@@ -12,10 +12,6 @@
  * 사용법:
  * - 메뉴 > "📊 마감작업 자동화" > "🔄 월말 마감 전체 프로세스" 실행
  * - 또는 각 기능을 개별적으로 실행
- * 
- * 작성자: Claude AI Assistant
- * 최종 수정: 2025-01-06
- */
 
 /**
  * 스프레드시트 열 때 커스텀 메뉴 생성
@@ -43,6 +39,22 @@ function onOpen() {
       .addItem('📄 업무대행료 정산 생성', 'createServiceFeeSettlement')
       .addItem('📦 모든 문서 한번에 생성', 'createAllDocuments'))
     .addSeparator()
+    .addSubMenu(ui.createMenu('🌾 사료 마감')
+      .addItem('📊 사료 표 자동 채우기', 'processFeedData')
+      .addItem('📈 구매실적만 업데이트', 'updatePurchaseRecordOnly'))
+    .addSeparator()
+    .addSubMenu(ui.createMenu('💊 축우 영양제 및 백신')
+      .addItem('📊 영양제/백신 표 자동 채우기', 'processMedicineData')
+      .addItem('🔍 영양제/백신 데이터 분석', 'analyzeMedicineData')
+      .addItem('📈 구매실적 업데이트', 'updateMedicinePurchasePerformance')
+      .addItem('👁️ 숨겨진 행 모두 표시', 'showAllHiddenRows')  // 추가
+      .addItem('🐛 구매실적 디버그', 'debugPurchasePerformance'))
+    .addSeparator()
+    .addSubMenu(ui.createMenu('📦 기타품목')
+      .addItem('📊 기타품목 표 자동 채우기', 'processOtherItems')
+      .addItem('🔍 기타품목 분석 (테스트)', 'analyzeOtherItems')
+      .addItem('🔄 기타품목 표 초기화', 'resetOtherItemsTable')
+      .addItem('✅ 시트 선택하여 처리', 'selectOtherItemSheets'))
     .addSubMenu(ui.createMenu('⚙️ 설정')
       .addItem('📅 기준 년/월 확인 및 설정', 'checkAndSetBaseDate')
       .addItem('⏭️ 다음 월로 자동 설정', 'setNextMonthMenu')
