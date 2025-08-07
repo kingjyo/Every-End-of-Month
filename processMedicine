@@ -1,0 +1,651 @@
+/**
+ * OtherItems.gs
+ * 기타품목 자동화 처리 모듈
+ * 
+ * 이 파일을 Code.gs와 같은 프로젝트에 별도 .gs 파일로 추가하세요
+ * 파일 추가 방법: Apps Script 편집기 > 파일 > 새 스크립트 파일 > "OtherItems" 입력
+ */
+
+/**
+ * 기타품목 시트 찾기 및 처리 - 메인 함수
+ */
+function processOtherItems() {
+  const ui = SpreadsheetApp.getUi();
+  
+  try {
+    logDebug('기타품목 처리 시작', '시트 검색 중...');
+    
+    // 1. 기타품목 시트 찾기
+    const otherItemSheets = findOtherItemSheets();
+    
+    if (otherItemSheets.length === 0) {
+      ui.alert(
+        '기타품목 시트 없음',
+        '기타품목에 해당하는 시트를 찾을 수 없습니다.\n\n' +
+        '조건:\n' +
+        '• "거래처원장"이 포함된 시트\n' +
+        '• "퓨리나", "영세", "과세", "제축섬유질사료"가 포함되지 않은 시트',
+        ui.ButtonSet.OK
+      );
+      return;
+    }
+    
+    // 2. "기타품목 표" 시트 확인
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    let targetSheet = spreadsheet.getSheetByName('기타품목 표');
+    
+    if (!targetSheet) {
+      const createResponse = ui.alert(
+        '기타품목 표 없음',
+        '"기타품목 표" 시트가 없습니다. 새로 만드시겠습니까?',
+        ui.ButtonSet.YES_NO
+      );
+      
+      if (createResponse === ui.Button.YES) {
+        targetSheet = createOtherItemsTemplateSheet(spreadsheet);
+      } else {
+        return;
+      }
+    }
+    
+    // 3. 사용자에게 확인
+    const response = ui.alert(
+      '기타품목 처리 확인',
+      `다음 ${otherItemSheets.length}개 시트를 처리합니다:\n\n` +
+      otherItemSheets.slice(0, 5).map(s => s.getName()).join('\n') +
+      (otherItemSheets.length > 5 ? `\n... 외 ${otherItemSheets.length - 5}개` : '') +
+      '\n\n계속하시겠습니까?',
+      ui.ButtonSet.YES_NO
+    );
+    
+    if (response !== ui.Button.YES) {
+      return;
+    }
+    
+    // 4. 기타품목 데이터 처리
+    const result = fillOtherItemsTables(otherItemSheets, targetSheet);
+    
+    // 5. E열이 빈 행 숨기기
+    hideEmptyRowsInOtherItems(targetSheet);
+    
+    // 6. 결과 표시
+    ui.alert(
+      '✅ 처리 완료',
+      `기타품목 처리가 완료되었습니다.\n\n` +
+      `• 처리된 시트: ${result.processedSheets}개\n` +
+      `• 사용된 표: ${result.usedTables}개\n` +
+      `• 총 데이터 행: ${result.totalRows}개\n\n` +
+      (result.errors.length > 0 ? `⚠️ 오류: ${result.errors.join(', ')}` : ''),
+      ui.ButtonSet.OK
+    );
+    
+    logDebug('기타품목 처리 완료', `${result.processedSheets}개 시트 처리`);
+    
+  } catch (error) {
+    ui.alert('오류', `기타품목 처리 중 오류: ${error.toString()}`, ui.ButtonSet.OK);
+    logDebug('기타품목 오류', error.toString());
+  }
+}
+
+/**
+ * 기타품목에 해당하는 시트 찾기
+ * @return {Sheet[]} 기타품목 시트 배열
+ */
+function findOtherItemSheets() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = spreadsheet.getSheets();
+  
+  // 제외 키워드
+  const excludeKeywords = ['퓨리나', '영세', '과세', '제축섬유질사료'];
+  
+  // 기타품목 시트 필터링
+  const otherItemSheets = sheets.filter(sheet => {
+    const sheetName = sheet.getName();
+    
+    // "거래처원장"이 포함되어야 함
+    if (!sheetName.includes('거래처원장')) {
+      return false;
+    }
+    
+    // 제외 키워드가 포함되면 안됨
+    for (const keyword of excludeKeywords) {
+      if (sheetName.includes(keyword)) {
+        return false;
+      }
+    }
+    
+    // 기타품목 표 자체는 제외
+    if (sheetName === '기타품목 표') {
+      return false;
+    }
+    
+    return true;
+  });
+  
+  logDebug('기타품목 시트 검색', `${otherItemSheets.length}개 발견`);
+  otherItemSheets.forEach(sheet => {
+    logDebug('기타품목 시트', sheet.getName());
+  });
+  
+  return otherItemSheets;
+}
+
+/**
+ * 기타품목 표 템플릿 생성
+ * @param {Spreadsheet} spreadsheet - 스프레드시트 객체
+ * @return {Sheet} 생성된 시트
+ */
+function createOtherItemsTemplateSheet(spreadsheet) {
+  const sheet = spreadsheet.insertSheet('기타품목 표');
+  
+  // 5개 표의 정확한 위치와 헤더 설정 (확장된 행 개수)
+  const tables = [
+    { headerRow: 2, dataStartRow: 4, dataEndRow: 13 },   // 10개 데이터 행
+    { headerRow: 15, dataStartRow: 17, dataEndRow: 27 }, // 11개 데이터 행
+    { headerRow: 29, dataStartRow: 31, dataEndRow: 41 }, // 11개 데이터 행
+    { headerRow: 43, dataStartRow: 45, dataEndRow: 54 }, // 10개 데이터 행
+    { headerRow: 56, dataStartRow: 58, dataEndRow: 67 }  // 10개 데이터 행
+  ];
+  
+  // 각 표에 헤더 추가
+  tables.forEach((table, index) => {
+    // 헤더 행 (각 표의 첫 번째 행)
+    sheet.getRange(table.headerRow, 2).setValue('품명/적요');
+    sheet.getRange(table.headerRow, 3).setValue('단가');
+    sheet.getRange(table.headerRow, 4).setValue('구입량');
+    sheet.getRange(table.headerRow, 5).setValue('구입금액');
+    sheet.getRange(table.headerRow, 6).setValue('비고');
+    
+    // 헤더 스타일
+    const headerRange = sheet.getRange(table.headerRow, 2, 1, 5);
+    headerRange.setBackground('#e0e0e0');
+    headerRange.setFontWeight('bold');
+    headerRange.setBorder(true, true, true, true, true, true);
+    
+    // 두 번째 헤더 행 (단위 표시)
+    sheet.getRange(table.headerRow + 1, 3).setValue('(원)');
+    sheet.getRange(table.headerRow + 1, 4).setValue('(kg)');
+    sheet.getRange(table.headerRow + 1, 5).setValue('(원)');
+    
+    // 표 구분을 위한 제목 (선택사항)
+    if (table.headerRow > 2) {
+      sheet.getRange(table.headerRow - 1, 2).setValue(`표 ${index + 1}`);
+    }
+  });
+  
+  // 열 너비 조정
+  sheet.setColumnWidth(2, 200); // B열
+  sheet.setColumnWidth(3, 100); // C열
+  sheet.setColumnWidth(4, 80);  // D열
+  sheet.setColumnWidth(5, 120); // E열
+  sheet.setColumnWidth(6, 100); // F열
+  
+  logDebug('기타품목 표 생성', '템플릿 시트 생성 완료');
+  
+  return sheet;
+}
+
+/**
+ * 기타품목 데이터를 표에 채우기
+ * @param {Sheet[]} sourceSheets - 원본 시트들
+ * @param {Sheet} targetSheet - 대상 시트 (기타품목 표)
+ * @return {object} 처리 결과
+ */
+function fillOtherItemsTables(sourceSheets, targetSheet) {
+  const result = {
+    processedSheets: 0,
+    usedTables: 0,
+    totalRows: 0,
+    errors: []
+  };
+  
+  // 5개 표의 정확한 위치 정의 (확장된 행 개수)
+  const tables = [
+    { headerRow: 2, dataStartRow: 4, dataEndRow: 13, index: 0 },   // 10개 데이터 행
+    { headerRow: 15, dataStartRow: 17, dataEndRow: 27, index: 1 }, // 11개 데이터 행
+    { headerRow: 29, dataStartRow: 31, dataEndRow: 41, index: 2 }, // 11개 데이터 행
+    { headerRow: 43, dataStartRow: 45, dataEndRow: 54, index: 3 }, // 10개 데이터 행
+    { headerRow: 56, dataStartRow: 58, dataEndRow: 67, index: 4 }  // 10개 데이터 행
+  ];
+  
+  // 먼저 기존 데이터 클리어
+  clearOtherItemsTables(targetSheet, tables);
+  
+  // 각 시트를 각 표에 할당 (1:1 매핑)
+  sourceSheets.forEach((sourceSheet, index) => {
+    if (index >= tables.length) {
+      result.errors.push(`${sourceSheet.getName()}: 표 부족 (최대 5개)`);
+      logDebug('기타품목 오류', `표 부족 - ${sourceSheet.getName()}`);
+      return;
+    }
+    
+    try {
+      const table = tables[index];
+      const data = extractOtherItemData(sourceSheet);
+      
+      if (data.length === 0) {
+        result.errors.push(`${sourceSheet.getName()}: 데이터 없음`);
+        return;
+      }
+      
+      // 표에 데이터 입력
+      const rowsAdded = fillTableData(targetSheet, table, data, sourceSheet.getName());
+      
+      result.processedSheets++;
+      result.usedTables++;
+      result.totalRows += rowsAdded;
+      
+      logDebug('기타품목 데이터 입력', 
+        `${sourceSheet.getName()} → 표${table.index + 1} (${rowsAdded}행)`);
+      
+    } catch (error) {
+      result.errors.push(`${sourceSheet.getName()}: ${error.toString()}`);
+      logDebug('기타품목 처리 오류', `${sourceSheet.getName()}: ${error.toString()}`);
+    }
+  });
+  
+  return result;
+}
+
+/**
+ * 기타품목 시트에서 데이터 추출
+ * @param {Sheet} sheet - 원본 시트
+ * @return {Array} 추출된 데이터 배열
+ */
+function extractOtherItemData(sheet) {
+  const data = sheet.getDataRange().getValues();
+  const extractedData = [];
+  
+  // 헤더는 3번째 행(인덱스 2)에 있음
+  const headerRow = 2;
+  
+  if (data.length <= headerRow) {
+    logDebug('데이터 추출 오류', `${sheet.getName()}: 데이터가 없음`);
+    return [];
+  }
+  
+  // 헤더 행에서 필요한 열 인덱스 찾기
+  const headers = data[headerRow];
+  let itemCol = -1;      // 품명/적요
+  let priceCol = -1;     // 단가
+  let qtyCol = -1;       // 구입량(kg)
+  let amountCol = -1;    // 공급가액
+  
+  for (let j = 0; j < headers.length; j++) {
+    const cellValue = String(headers[j]).toLowerCase().replace(/\s/g, '');
+    
+    if (cellValue.includes('품명') || cellValue.includes('적요')) {
+      itemCol = j;
+    }
+    if (cellValue === '단가' || cellValue.includes('단가')) {
+      priceCol = j;
+    }
+    if (cellValue.includes('구입량')) {
+      qtyCol = j;
+    }
+    if (cellValue.includes('공급가액')) {
+      amountCol = j;
+    }
+  }
+  
+  // 필수 열이 없으면 오류
+  if (itemCol === -1) {
+    logDebug('데이터 추출 오류', `${sheet.getName()}: 품명/적요 열을 찾을 수 없음`);
+    return [];
+  }
+  
+  logDebug('헤더 매핑', 
+    `${sheet.getName()} - 품명:${itemCol}, 단가:${priceCol}, 구입량:${qtyCol}, 공급가액:${amountCol}`);
+  
+  // 데이터 추출 (헤더 다음 행부터)
+  for (let i = headerRow + 1; i < data.length; i++) {
+    const row = data[i];
+    
+    // B열(인덱스 1)에 "합계"가 있으면 중단
+    if (row.length > 1 && String(row[1]).includes('합계')) {
+      break;
+    }
+    
+    // 품명이 비어있으면 건너뛰기
+    if (!row[itemCol] || String(row[itemCol]).trim() === '') {
+      continue;
+    }
+    
+    extractedData.push({
+      item: String(row[itemCol]).trim(),
+      price: priceCol !== -1 && row[priceCol] ? row[priceCol] : '',
+      quantity: qtyCol !== -1 && row[qtyCol] ? row[qtyCol] : '',
+      amount: amountCol !== -1 && row[amountCol] ? row[amountCol] : ''
+    });
+  }
+  
+  logDebug('데이터 추출', `${sheet.getName()}: ${extractedData.length}행 추출`);
+  
+  return extractedData;
+}
+
+/**
+ * 표에 데이터 입력
+ * @param {Sheet} targetSheet - 대상 시트
+ * @param {object} table - 표 정보
+ * @param {Array} data - 입력할 데이터
+ * @param {string} sourceName - 원본 시트 이름
+ * @return {number} 입력된 행 수
+ */
+function fillTableData(targetSheet, table, data, sourceName) {
+  const maxDataRows = table.dataEndRow - table.dataStartRow + 1;
+  
+  // 표 제목에 원본 시트 이름 표시 (헤더 위 행에)
+  if (table.headerRow > 1) {
+    targetSheet.getRange(table.headerRow - 1, 2).setValue(sourceName);
+  }
+  
+  // 입력할 데이터 수 제한
+  const dataToFill = data.slice(0, maxDataRows);
+  
+  dataToFill.forEach((item, index) => {
+    const row = table.dataStartRow + index;
+    
+    // B열: 품명/적요
+    targetSheet.getRange(row, 2).setValue(item.item);
+    
+    // C열: 단가
+    if (item.price !== '') {
+      targetSheet.getRange(row, 3).setValue(item.price);
+    }
+    
+    // D열: 구입량(kg)
+    if (item.quantity !== '') {
+      targetSheet.getRange(row, 4).setValue(item.quantity);
+    }
+    
+    // E열: 구입금액 (공급가액)
+    if (item.amount !== '') {
+      targetSheet.getRange(row, 5).setValue(item.amount);
+    }
+    
+    // F열: 비고는 사용자가 직접 입력하므로 비워둠
+  });
+  
+  // 합계 행 추가 (데이터가 있는 경우)
+  if (dataToFill.length > 0 && dataToFill.length < maxDataRows) {
+    const sumRow = table.dataStartRow + dataToFill.length;
+    targetSheet.getRange(sumRow, 2).setValue('합계');
+    
+    // 구입금액 합계 수식
+    const sumFormula = `=SUM(E${table.dataStartRow}:E${sumRow - 1})`;
+    targetSheet.getRange(sumRow, 5).setFormula(sumFormula);
+    
+    // 합계 행 스타일
+    const sumRange = targetSheet.getRange(sumRow, 2, 1, 5);
+    sumRange.setFontWeight('bold');
+    sumRange.setBackground('#f0f0f0');
+  }
+  
+  return dataToFill.length;
+}
+
+/**
+ * 기타품목 표의 기존 데이터 클리어
+ * @param {Sheet} sheet - 대상 시트
+ * @param {Array} tables - 표 위치 배열
+ */
+function clearOtherItemsTables(sheet, tables) {
+  tables.forEach(table => {
+    // 각 표의 데이터 영역 클리어 (헤더는 유지)
+    const numRows = table.dataEndRow - table.dataStartRow + 1;
+    const dataRange = sheet.getRange(table.dataStartRow, 2, numRows, 5);
+    dataRange.clearContent();
+    
+    // 표 제목 초기화 (헤더 위 행)
+    if (table.headerRow > 1) {
+      sheet.getRange(table.headerRow - 1, 2).setValue('');
+    }
+  });
+  
+  logDebug('기타품목 표 클리어', '모든 표 데이터 삭제');
+}
+
+/**
+ * E열이 빈 행 숨기기
+ * @param {Sheet} sheet - 대상 시트
+ */
+function hideEmptyRowsInOtherItems(sheet) {
+  const tables = [
+    { dataStartRow: 4, dataEndRow: 13 },   // 표1
+    { dataStartRow: 17, dataEndRow: 27 },  // 표2
+    { dataStartRow: 31, dataEndRow: 41 },  // 표3
+    { dataStartRow: 45, dataEndRow: 54 },  // 표4
+    { dataStartRow: 58, dataEndRow: 67 }   // 표5
+  ];
+  
+  let hiddenCount = 0;
+  
+  // 먼저 모든 행 표시
+  sheet.showRows(1, sheet.getMaxRows());
+  
+  tables.forEach(table => {
+    // 각 표의 데이터 행 확인
+    for (let row = table.dataStartRow; row <= table.dataEndRow; row++) {
+      const amountValue = sheet.getRange(row, 5).getValue(); // E열 (구입금액)
+      const itemValue = sheet.getRange(row, 2).getValue(); // B열 (품명)
+      
+      // E열(구입금액)이 비어있고, 합계 행이 아닌 경우 숨기기
+      if ((!amountValue || amountValue === '') && 
+          (!itemValue || itemValue === '' || String(itemValue).trim() === '')) {
+        sheet.hideRows(row);
+        hiddenCount++;
+      }
+    }
+  });
+  
+  logDebug('행 숨기기', `${hiddenCount}개 행 숨김 처리`);
+}
+
+/**
+ * 기타품목 분석 (테스트용)
+ */
+function analyzeOtherItems() {
+  const otherItemSheets = findOtherItemSheets();
+  
+  console.log('========== 기타품목 분석 ==========');
+  console.log(`기타품목 시트 수: ${otherItemSheets.length}개`);
+  console.log('');
+  
+  if (otherItemSheets.length === 0) {
+    console.log('기타품목 시트를 찾을 수 없습니다.');
+    console.log('조건:');
+    console.log('  - "거래처원장"이 포함된 시트');
+    console.log('  - "퓨리나", "영세", "과세", "제축섬유질사료"가 포함되지 않은 시트');
+    console.log('========== 분석 종료 ==========');
+    return;
+  }
+  
+  otherItemSheets.forEach((sheet, index) => {
+    console.log(`${index + 1}. ${sheet.getName()}`);
+    
+    // 3번째 행의 헤더 확인
+    const headerRow = sheet.getRange(3, 1, 1, sheet.getMaxColumns()).getValues()[0];
+    console.log('   헤더 확인:');
+    headerRow.forEach((header, idx) => {
+      if (header && String(header).trim()) {
+        console.log(`     열 ${idx + 1}: ${header}`);
+      }
+    });
+    
+    const data = extractOtherItemData(sheet);
+    console.log(`   - 데이터 행 수: ${data.length}`);
+    
+    if (data.length > 0) {
+      console.log(`   - 첫 번째 품목: ${data[0].item}`);
+      
+      // 합계 계산
+      let total = 0;
+      data.forEach(item => {
+        const amount = parseFloat(item.amount) || 0;
+        total += amount;
+      });
+      console.log(`   - 총 금액: ${total.toLocaleString()}원`);
+      
+      // 상위 3개 품목 표시
+      console.log('   - 주요 품목:');
+      data.slice(0, 3).forEach((item, i) => {
+        console.log(`     ${i + 1}) ${item.item}: ${item.amount}원`);
+      });
+    }
+    console.log('');
+  });
+  
+  console.log('========== 분석 완료 ==========');
+}
+
+/**
+ * 기타품목 표 초기화
+ */
+function resetOtherItemsTable() {
+  const ui = SpreadsheetApp.getUi();
+  
+  const response = ui.alert(
+    '기타품목 표 초기화',
+    '기타품목 표의 모든 데이터를 삭제하시겠습니까?\n\n' +
+    '(헤더는 유지됩니다)',
+    ui.ButtonSet.YES_NO
+  );
+  
+  if (response !== ui.Button.YES) {
+    return;
+  }
+  
+  try {
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const targetSheet = spreadsheet.getSheetByName('기타품목 표');
+    
+    if (!targetSheet) {
+      ui.alert('오류', '"기타품목 표" 시트를 찾을 수 없습니다.', ui.ButtonSet.OK);
+      return;
+    }
+    
+    // 표 위치 정의 (확장된 행 개수)
+    const tables = [
+      { headerRow: 2, dataStartRow: 4, dataEndRow: 13 },   // 10개 데이터 행
+      { headerRow: 15, dataStartRow: 17, dataEndRow: 27 }, // 11개 데이터 행
+      { headerRow: 29, dataStartRow: 31, dataEndRow: 41 }, // 11개 데이터 행
+      { headerRow: 43, dataStartRow: 45, dataEndRow: 54 }, // 10개 데이터 행
+      { headerRow: 56, dataStartRow: 58, dataEndRow: 67 }  // 10개 데이터 행
+    ];
+    
+    // 데이터 클리어
+    clearOtherItemsTables(targetSheet, tables);
+    
+    // 모든 행 표시
+    targetSheet.showRows(1, targetSheet.getMaxRows());
+    
+    ui.alert('✅ 완료', '기타품목 표가 초기화되었습니다.', ui.ButtonSet.OK);
+    logDebug('기타품목 초기화', '완료');
+    
+  } catch (error) {
+    ui.alert('오류', `초기화 중 오류: ${error.toString()}`, ui.ButtonSet.OK);
+    logDebug('기타품목 초기화 오류', error.toString());
+  }
+}
+
+/**
+ * 기타품목 시트 수동 선택 처리
+ * 5개 이상의 시트가 있을 때 사용자가 선택할 수 있도록
+ */
+function selectOtherItemSheets() {
+  const ui = SpreadsheetApp.getUi();
+  const otherItemSheets = findOtherItemSheets();
+  
+  if (otherItemSheets.length === 0) {
+    ui.alert(
+      '기타품목 시트 없음',
+      '기타품목 시트를 찾을 수 없습니다.',
+      ui.ButtonSet.OK
+    );
+    return;
+  }
+  
+  if (otherItemSheets.length <= 5) {
+    // 5개 이하면 자동 처리
+    processOtherItems();
+    return;
+  }
+  
+  // 5개 초과시 선택 다이얼로그
+  let html = '<div style="font-family: Arial, sans-serif; padding: 20px;">';
+  html += '<h3>기타품목 시트 선택</h3>';
+  html += '<p>처리할 시트를 선택하세요 (최대 5개):</p>';
+  html += '<form id="sheetForm">';
+  
+  otherItemSheets.forEach((sheet, index) => {
+    html += `<div style="margin: 10px 0;">`;
+    html += `<input type="checkbox" id="sheet${index}" name="sheets" value="${sheet.getName()}" `;
+    if (index < 5) html += 'checked';
+    html += `>`;
+    html += `<label for="sheet${index}">${sheet.getName()}</label>`;
+    html += `</div>`;
+  });
+  
+  html += '</form>';
+  html += '<div style="margin-top: 20px;">';
+  html += '<button onclick="processSelected()">처리하기</button> ';
+  html += '<button onclick="google.script.host.close()">취소</button>';
+  html += '</div>';
+  html += '</div>';
+  
+  // 스크립트 추가
+  html += `
+    <script>
+      function processSelected() {
+        const checkboxes = document.querySelectorAll('input[name="sheets"]:checked');
+        if (checkboxes.length > 5) {
+          alert('최대 5개까지만 선택 가능합니다.');
+          return;
+        }
+        const selected = Array.from(checkboxes).map(cb => cb.value);
+        google.script.run.processSelectedOtherItems(selected);
+        google.script.host.close();
+      }
+    </script>
+  `;
+  
+  const htmlOutput = HtmlService.createHtmlOutput(html)
+      .setWidth(400)
+      .setHeight(500);
+  
+  ui.showModalDialog(htmlOutput, '기타품목 시트 선택');
+}
+
+/**
+ * 선택된 기타품목 시트 처리
+ * @param {Array<string>} selectedSheetNames - 선택된 시트 이름들
+ */
+function processSelectedOtherItems(selectedSheetNames) {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const selectedSheets = selectedSheetNames.map(name => 
+    spreadsheet.getSheetByName(name)
+  ).filter(sheet => sheet !== null);
+  
+  if (selectedSheets.length === 0) {
+    return;
+  }
+  
+  // 기타품목 표 시트 확인 또는 생성
+  let targetSheet = spreadsheet.getSheetByName('기타품목 표');
+  if (!targetSheet) {
+    targetSheet = createOtherItemsTemplateSheet(spreadsheet);
+  }
+  
+  // 처리
+  const result = fillOtherItemsTables(selectedSheets, targetSheet);
+  hideEmptyRowsInOtherItems(targetSheet);
+  
+  // 결과 알림
+  const ui = SpreadsheetApp.getUi();
+  ui.alert(
+    '✅ 처리 완료',
+    `선택한 ${selectedSheets.length}개 시트 처리가 완료되었습니다.`,
+    ui.ButtonSet.OK
+  );
+}
