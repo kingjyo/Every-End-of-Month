@@ -1,0 +1,675 @@
+/**
+ * 거래처원장 데이터 정리 모듈 v3.1
+ * 
+ * 주요 기능:
+ * 1. 거래처원장 시트 자동 탐지
+ * 2. 공급가액 계산 
+ *    - 일반: 수량 × 단가
+ *    - 과세: 수량 × (단가 ÷ 1.1)
+ * 3. 잔액 누적 계산
+ * 4. 품명/적요 표준화
+ * 5. 합계 자동 추가
+ * 
+ * 이 모듈은 데이터만 정리하며, 시트 삭제나 관리는 하지 않음
+ */
+
+/**
+ * 거래처원장 정리 메인 함수
+ */
+function processSupplierLedgers() {
+  const ui = SpreadsheetApp.getUi();
+  
+  try {
+    logDebug('거래처원장 정리', '시작');
+    
+    // 기준 년/월 가져오기
+    const baseDate = getBaseYearMonth();
+    
+    // 거래처원장 시트 찾기
+    const ledgerSheets = findLedgerSheets(baseDate);
+    
+    if (ledgerSheets.length === 0) {
+      ui.alert(
+        '시트 없음',
+        '거래처원장 시트를 찾을 수 없습니다.',
+        ui.ButtonSet.OK
+      );
+      return;
+    }
+    
+    // 처리 확인
+    const response = ui.alert(
+      '💼 거래처원장 정리',
+      `${ledgerSheets.length}개의 거래처원장 시트를 발견했습니다:\n\n` +
+      `${ledgerSheets.map(s => '• ' + s.getName()).join('\n')}\n\n` +
+      `작업 내용:\n` +
+      `• 공급가액 자동 계산\n` +
+      `  - 일반/영세: 수량 × 단가\n` +
+      `  - 과세: 수량 × (단가 ÷ 1.1)\n` +
+      `• 부가세 = 공급가액 × 10% 계산\n` +
+      `• 품명/적요 표준화\n` +
+      `• 잔액 누적 계산\n\n` +
+      `데이터를 정리하시겠습니까?`,
+      ui.ButtonSet.YES_NO
+    );
+    
+    if (response !== ui.Button.YES) {
+      return;
+    }
+    
+    // 각 시트 처리
+    const results = [];
+    let totalProcessed = 0;
+    let totalAmount = 0;
+    
+    ledgerSheets.forEach(sheet => {
+      try {
+        const result = processLedgerSheet(sheet);
+        results.push(result);
+        totalProcessed += result.processedRows;
+        totalAmount += result.totalAmount;
+        
+        logDebug('시트 처리 완료', 
+                 `${sheet.getName()}: ${result.processedRows}행, ${formatAmount(result.totalAmount)}원`);
+        
+      } catch (error) {
+        results.push({
+          sheetName: sheet.getName(),
+          success: false,
+          error: error.toString()
+        });
+        logDebug('시트 처리 오류', `${sheet.getName()}: ${error.toString()}`);
+      }
+    });
+    
+    // 결과 표시
+    showResults(results, totalProcessed, totalAmount);
+    
+  } catch (error) {
+    ui.alert('오류', `거래처원장 정리 중 오류: ${error.toString()}`, ui.ButtonSet.OK);
+    logDebug('거래처원장 정리 오류', error.toString());
+  }
+}
+
+/**
+ * 거래처원장 시트 찾기
+ */
+function findLedgerSheets(baseDate) {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = spreadsheet.getSheets();
+  const ledgerSheets = [];
+  
+  // 찾을 패턴들
+  const patterns = [
+    `거래처원장${baseDate.yearShort}.${baseDate.month}`,
+    `거래처원장${baseDate.yearShort}.${baseDate.monthShort}`,
+    `거래처원장 ${baseDate.yearShort}.${baseDate.month}`,
+    `거래처원장 ${baseDate.yearShort}.${baseDate.monthShort}`,
+    `거래처 원장${baseDate.yearShort}`,
+    `거래처원장`
+  ];
+  
+  sheets.forEach(sheet => {
+    const sheetName = sheet.getName();
+    const sheetNameLower = sheetName.toLowerCase();
+    
+    // 보호 시트는 제외 (총 정리 표 등)
+    if (sheetNameLower.includes('정리') || sheetNameLower.includes('정리표')) {
+      return;
+    }
+    
+    // 거래처원장 패턴 확인
+    const isLedger = patterns.some(pattern => 
+      sheetNameLower.includes(pattern.toLowerCase())
+    ) || sheetNameLower.includes('원장');
+    
+    if (isLedger) {
+      // 데이터 구조 확인
+      if (hasLedgerStructure(sheet)) {
+        ledgerSheets.push(sheet);
+        logDebug('거래처원장 발견', sheetName);
+      }
+    }
+  });
+  
+  return ledgerSheets;
+}
+
+/**
+ * 거래처원장 구조인지 확인
+ */
+function hasLedgerStructure(sheet) {
+  try {
+    const data = sheet.getDataRange().getValues();
+    
+    // 처음 20행에서 "거래처 원장" 텍스트 찾기
+    for (let i = 0; i < Math.min(20, data.length); i++) {
+      for (let j = 0; j < Math.min(5, data[i].length); j++) {
+        const cellValue = String(data[i][j]).toLowerCase();
+        if (cellValue.includes('거래처') && cellValue.includes('원장')) {
+          return true;
+        }
+      }
+    }
+    
+    // 또는 헤더 키워드로 판단
+    const headerKeywords = ['수량', '단가', '공급가', '금액', '품명'];
+    let keywordCount = 0;
+    
+    for (let i = 0; i < Math.min(15, data.length); i++) {
+      const rowText = data[i].join(' ').toLowerCase();
+      headerKeywords.forEach(keyword => {
+        if (rowText.includes(keyword)) keywordCount++;
+      });
+      
+      if (keywordCount >= 3) return true;
+    }
+    
+    return false;
+    
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
+ * 개별 거래처원장 시트 처리
+ */
+function processLedgerSheet(sheet) {
+  const sheetName = sheet.getName();
+  
+  // 시트 타입 판별
+  const sheetType = detectSheetType(sheetName);
+  const isTaxable = sheetType === '약품_과세'; // 과세 시트 여부
+  
+  logDebug('시트 타입', `${sheetName}: ${sheetType} (과세: ${isTaxable})`);
+  
+  // 데이터 영역 찾기
+  const dataInfo = findDataRange(sheet);
+  if (!dataInfo) {
+    throw new Error('데이터 영역을 찾을 수 없습니다');
+  }
+  
+  // 헤더 정보 분석
+  const headerInfo = analyzeHeaders(sheet, dataInfo.headerRow);
+  if (!headerInfo.valid) {
+    throw new Error('필수 열을 찾을 수 없습니다');
+  }
+  
+  // 데이터 처리
+  let processedRows = 0;
+  let totalAmount = 0;
+  let runningBalance = 0;
+  
+  // 각 데이터 행 처리
+  for (let row = dataInfo.startRow; row <= dataInfo.endRow; row++) {
+    try {
+      // 행 데이터 가져오기
+      const rowData = sheet.getRange(row, 1, 1, sheet.getMaxColumns()).getValues()[0];
+      
+      // 빈 행 체크
+      if (isEmptyRow(rowData, headerInfo.columns)) {
+        continue;
+      }
+      
+      // 수량, 단가 가져오기
+      const quantity = parseNumber(rowData[headerInfo.columns.quantity]);
+      let unitPrice = parseNumber(rowData[headerInfo.columns.unitPrice]);
+      
+      // 중량이 있는 경우 (D열)
+      let weight = 1;
+      if (headerInfo.columns.weight !== undefined) {
+        weight = parseNumber(rowData[headerInfo.columns.weight]) || 1;
+      }
+      
+      // 공급가액 계산
+      let supplyAmount = 0;
+      
+      if (isTaxable) {
+        // 과세 시트: 단가에 부가세 포함되어 있음
+        // 공급가액 = 중량 × 수량 × (단가 ÷ 1.1)
+        const priceWithoutVAT = unitPrice / 1.1; // 부가세 제외 단가
+        const roundedPrice = Math.round(priceWithoutVAT * 10000) / 10000; // 소수점 4자리
+        supplyAmount = Math.round(weight * quantity * roundedPrice);
+        
+        logDebug('과세 계산', 
+                 `행 ${row}: 단가 ${unitPrice} → VAT제외 ${roundedPrice} × 수량 ${quantity} = ${supplyAmount}`);
+        
+      } else {
+        // 일반/영세 시트: 단가에 부가세 미포함
+        // 공급가액 = 중량 × 수량 × 단가
+        supplyAmount = Math.round(weight * quantity * unitPrice);
+      }
+      
+      if (supplyAmount > 0) {
+        // 공급가액 설정
+        sheet.getRange(row, headerInfo.columns.supplyAmount + 1).setValue(supplyAmount);
+        sheet.getRange(row, headerInfo.columns.supplyAmount + 1).setNumberFormat('#,##0');
+        
+        // 부가세 계산 (있는 경우)
+        if (headerInfo.columns.vat !== undefined) {
+          let vat = 0;
+          
+          if (isTaxable) {
+            // 과세: 부가세 별도 계산 (공급가액의 10%)
+            vat = Math.round(supplyAmount * 0.1);
+          } else if (sheetType === '약품_영세') {
+            // 영세: 부가세 0
+            vat = 0;
+          } else {
+            // 기타: 공급가액의 10%
+            vat = Math.round(supplyAmount * 0.1);
+          }
+          
+          sheet.getRange(row, headerInfo.columns.vat + 1).setValue(vat);
+          sheet.getRange(row, headerInfo.columns.vat + 1).setNumberFormat('#,##0');
+        }
+        
+        // 합계 (있는 경우)
+        if (headerInfo.columns.total !== undefined) {
+          const vat = headerInfo.columns.vat !== undefined ? 
+                      parseNumber(sheet.getRange(row, headerInfo.columns.vat + 1).getValue()) : 0;
+          const total = supplyAmount + vat;
+          
+          sheet.getRange(row, headerInfo.columns.total + 1).setValue(total);
+          sheet.getRange(row, headerInfo.columns.total + 1).setNumberFormat('#,##0');
+        }
+        
+        // 잔액 누적
+        runningBalance += supplyAmount;
+        if (headerInfo.columns.balance !== undefined) {
+          sheet.getRange(row, headerInfo.columns.balance + 1).setValue(runningBalance);
+          sheet.getRange(row, headerInfo.columns.balance + 1).setNumberFormat('#,##0');
+        }
+        
+        totalAmount += supplyAmount;
+        processedRows++;
+      }
+      
+      // 품명 표준화
+      if (headerInfo.columns.description !== undefined) {
+        const originalName = rowData[headerInfo.columns.description];
+        const standardName = standardizeItemName(originalName, sheetType);
+        if (standardName !== originalName) {
+          sheet.getRange(row, headerInfo.columns.description + 1).setValue(standardName);
+        }
+      }
+      
+    } catch (error) {
+      logDebug('행 처리 오류', `${sheetName} ${row}행: ${error.toString()}`);
+    }
+  }
+  
+  // 합계 행 추가
+  if (totalAmount > 0 && dataInfo.endRow < sheet.getMaxRows()) {
+    addTotalRow(sheet, dataInfo.endRow + 1, headerInfo.columns, totalAmount, isTaxable);
+  }
+  
+  return {
+    sheetName: sheetName,
+    sheetType: sheetType,
+    isTaxable: isTaxable,
+    success: true,
+    processedRows: processedRows,
+    totalAmount: totalAmount,
+    dataRange: `${dataInfo.startRow}~${dataInfo.endRow}행`
+  };
+}
+
+/**
+ * 시트 타입 판별
+ */
+function detectSheetType(sheetName) {
+  const nameLower = sheetName.toLowerCase();
+  
+  // 과세 확인이 최우선
+  if (nameLower.includes('과세')) {
+    return '약품_과세';
+  }
+  
+  // 영세 확인
+  if (nameLower.includes('영세')) {
+    return '약품_영세';
+  }
+  
+  // 기타 타입
+  if (nameLower.includes('퓨리나')) return '사료';
+  if (nameLower.includes('제축섬유질')) return '연맥';
+  if (nameLower.includes('현클리닉')) return '약품';
+  
+  return '기타';
+}
+
+/**
+ * 데이터 영역 찾기
+ */
+function findDataRange(sheet) {
+  const maxRows = sheet.getMaxRows();
+  
+  // B열에서 "거래처 원장" 찾기
+  for (let row = 1; row <= Math.min(30, maxRows); row++) {
+    const cellValue = sheet.getRange(row, 2).getValue();
+    
+    if (cellValue && String(cellValue).includes('거래처')) {
+      // 헤더는 보통 5행 아래
+      const headerRow = row + 5;
+      
+      if (headerRow > maxRows) continue;
+      
+      // 헤더 확인
+      const headerRange = sheet.getRange(headerRow, 1, 1, sheet.getMaxColumns());
+      const headers = headerRange.getValues()[0];
+      const headerText = headers.join(' ').toLowerCase();
+      
+      if (headerText.includes('날짜') || headerText.includes('품명') || headerText.includes('수량')) {
+        // 데이터 시작과 끝 찾기
+        const dataStartRow = headerRow + 1;
+        let dataEndRow = dataStartRow;
+        
+        for (let checkRow = dataStartRow; checkRow <= maxRows; checkRow++) {
+          const rowData = sheet.getRange(checkRow, 2, 1, 5).getValues()[0];
+          const hasData = rowData.some(cell => cell !== '' && cell !== null);
+          
+          if (!hasData) {
+            // 연속 2개 빈 행이면 종료
+            if (checkRow + 1 <= maxRows) {
+              const nextRowData = sheet.getRange(checkRow + 1, 2, 1, 5).getValues()[0];
+              if (!nextRowData.some(cell => cell !== '' && cell !== null)) {
+                dataEndRow = checkRow - 1;
+                break;
+              }
+            }
+          } else {
+            dataEndRow = checkRow;
+          }
+        }
+        
+        return {
+          headerRow: headerRow,
+          startRow: dataStartRow,
+          endRow: dataEndRow
+        };
+      }
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * 헤더 분석
+ */
+function analyzeHeaders(sheet, headerRow) {
+  const headers = sheet.getRange(headerRow, 1, 1, sheet.getMaxColumns()).getValues()[0];
+  const columns = {};
+  
+  // 각 헤더 찾기 (0-based index)
+  headers.forEach((header, index) => {
+    const h = String(header).toLowerCase().replace(/\s/g, '');
+    
+    if (h.includes('날짜') || h.includes('일자')) columns.date = index;
+    if (h.includes('품명') || h.includes('적요')) columns.description = index;
+    if (h.includes('중량') || h === '중') columns.weight = index;
+    if ((h === '수량' || h === '수' || h.includes('수량')) && !h.includes('단')) columns.quantity = index;
+    if (h.includes('단가') || h === '단') columns.unitPrice = index;
+    if (h.includes('공급가') || h === '공급액' || h === '금액') columns.supplyAmount = index;
+    if (h.includes('부가세') || h.includes('세액')) columns.vat = index;
+    if (h === '합계' || h === '총액' || h.includes('합계')) columns.total = index;
+    if (h.includes('잔액') || h.includes('잔고')) columns.balance = index;
+  });
+  
+  // 필수 열 확인
+  const valid = columns.quantity !== undefined && 
+                columns.unitPrice !== undefined && 
+                columns.supplyAmount !== undefined;
+  
+  logDebug('헤더 분석', `수량:${columns.quantity}, 단가:${columns.unitPrice}, 공급가:${columns.supplyAmount}`);
+  
+  return { valid, columns };
+}
+
+/**
+ * 빈 행 확인
+ */
+function isEmptyRow(rowData, columns) {
+  // 날짜, 품명, 수량, 단가 모두 비어있으면 빈 행
+  const hasDate = columns.date !== undefined && rowData[columns.date];
+  const hasDesc = columns.description !== undefined && rowData[columns.description];
+  const hasQty = columns.quantity !== undefined && parseNumber(rowData[columns.quantity]) > 0;
+  const hasPrice = columns.unitPrice !== undefined && parseNumber(rowData[columns.unitPrice]) > 0;
+  
+  return !hasDate && !hasDesc && !hasQty && !hasPrice;
+}
+
+/**
+ * 숫자 파싱
+ */
+function parseNumber(value) {
+  if (typeof value === 'number') return value;
+  if (!value) return 0;
+  
+  let str = String(value);
+  str = str.replace(/[,\s원₩$]/g, '');
+  
+  if (str.startsWith('(') && str.endsWith(')')) {
+    str = '-' + str.slice(1, -1);
+  }
+  
+  const num = parseFloat(str);
+  return isNaN(num) ? 0 : num;
+}
+
+/**
+ * 품명 표준화
+ */
+function standardizeItemName(name, sheetType) {
+  if (!name) return '';
+  
+  let standardized = String(name).trim();
+  
+  switch(sheetType) {
+    case '사료':
+      return standardizeFeedName(standardized);
+    case '약품_영세':
+    case '약품_과세':
+    case '약품':
+      return standardizeMedicineName(standardized);
+    case '연맥':
+      return '연맥';
+    default:
+      return standardized;
+  }
+}
+
+/**
+ * 사료명 표준화
+ */
+function standardizeFeedName(name) {
+  // (퓨) 제거
+  name = name.replace(/[（(]퓨[)）]/g, '');
+  
+  // 송아지본 처리
+  if (name.includes('송아지본')) {
+    if (name.includes('110')) return '송아지본 110+';
+    if (name.includes('230')) return '송아지본 230+';
+  }
+  
+  // 포커스 제품
+  if (name.includes('포커스')) {
+    const isBulk = name.includes('벌크');
+    
+    if (name.includes('마무리')) return `포커스마무리 ${isBulk ? '벌크' : '지대'}`;
+    if (name.includes('육성')) {
+      if (name.includes('암/수') || name.includes('암수')) {
+        return `포커스육성(암/수) ${isBulk ? '벌크' : '지대'}`;
+      }
+      return `포커스육성 ${isBulk ? '벌크' : '지대'}`;
+    }
+    if (name.includes('임신우')) return `포커스임신우 ${isBulk ? '벌크' : '지대'}`;
+    if (name.includes('큰소')) return `포커스큰소 ${isBulk ? '벌크' : '지대'}`;
+    if (name.includes('번식우')) return `포커스번식우 ${isBulk ? '벌크' : '지대'}`;
+  }
+  
+  return name;
+}
+
+/**
+ * 약품명 표준화
+ */
+function standardizeMedicineName(name) {
+  // 특수 케이스
+  if (name.includes('플로리부스터-갈프')) return name;
+  
+  // 비오쓰리 특수 처리
+  if (name.includes('비오쓰리') && name.includes('(동-삼양)')) {
+    return name.replace(/\(동-삼양\)(\d+[a-zA-Z]+)/g, '(동-삼양)-$1');
+  }
+  
+  // 일반적인 경우: 약품명-규격
+  const pattern = /^([^-\d]+)(\d+[a-zA-Z]+)$/;
+  const match = name.match(pattern);
+  
+  if (match) {
+    return match[1] + '-' + match[2];
+  }
+  
+  return name;
+}
+
+/**
+ * 합계 행 추가
+ */
+function addTotalRow(sheet, row, columns, totalAmount, isTaxable) {
+  try {
+    // "합계" 표시
+    if (columns.description !== undefined) {
+      sheet.getRange(row, columns.description + 1).setValue('합계');
+    } else if (columns.date !== undefined) {
+      sheet.getRange(row, columns.date + 1).setValue('합계');
+    }
+    
+    // 총액 표시
+    sheet.getRange(row, columns.supplyAmount + 1).setValue(totalAmount);
+    sheet.getRange(row, columns.supplyAmount + 1).setNumberFormat('#,##0');
+    
+    // 부가세 합계 (과세인 경우만)
+    if (columns.vat !== undefined && isTaxable) {
+      const totalVat = Math.round(totalAmount * 0.1);
+      sheet.getRange(row, columns.vat + 1).setValue(totalVat);
+      sheet.getRange(row, columns.vat + 1).setNumberFormat('#,##0');
+      
+      // 전체 합계 (공급가액 + 부가세)
+      if (columns.total !== undefined) {
+        sheet.getRange(row, columns.total + 1).setValue(totalAmount + totalVat);
+        sheet.getRange(row, columns.total + 1).setNumberFormat('#,##0');
+      }
+    }
+    
+    // 서식 설정
+    sheet.getRange(row, 1, 1, sheet.getMaxColumns()).setFontWeight('bold');
+    sheet.getRange(row, 1, 1, sheet.getMaxColumns()).setBackground('#f0f0f0');
+    
+    logDebug('합계 추가', `${row}행에 ${formatAmount(totalAmount)}원 (과세: ${isTaxable})`);
+    
+  } catch (error) {
+    logDebug('합계 추가 오류', error.toString());
+  }
+}
+
+/**
+ * 처리 결과 표시
+ */
+function showResults(results, totalProcessed, totalAmount) {
+  const ui = SpreadsheetApp.getUi();
+  
+  let message = '📊 거래처원장 정리 완료\n\n';
+  
+  const successResults = results.filter(r => r.success);
+  const failedResults = results.filter(r => !r.success);
+  
+  if (successResults.length > 0) {
+    message += '✅ 성공적으로 처리된 시트:\n';
+    successResults.forEach(result => {
+      message += `\n📋 ${result.sheetName} (${result.sheetType})\n`;
+      if (result.isTaxable) {
+        message += `  • ⚠️ 과세 시트 (단가÷1.1 적용)\n`;
+      }
+      message += `  • 처리 범위: ${result.dataRange}\n`;
+      message += `  • 처리된 행: ${result.processedRows}개\n`;
+      message += `  • 금액 합계: ${formatAmount(result.totalAmount)}원\n`;
+    });
+  }
+  
+  if (failedResults.length > 0) {
+    message += '\n⚠️ 처리 실패:\n';
+    failedResults.forEach(result => {
+      message += `  • ${result.sheetName}: ${result.error}\n`;
+    });
+  }
+  
+  message += `\n📌 전체 요약:\n`;
+  message += `  • 처리된 행: ${totalProcessed}개\n`;
+  message += `  • 총 금액: ${formatAmount(totalAmount)}원`;
+  
+  ui.alert('거래처원장 정리 완료', message, ui.ButtonSet.OK);
+}
+
+/**
+ * 금액 포맷팅
+ */
+function formatAmount(amount) {
+  return Math.round(amount).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+/**
+ * 거래처원장 분석 (테스트용)
+ */
+function analyzeSupplierLedgers() {
+  const ui = SpreadsheetApp.getUi();
+  const baseDate = getBaseYearMonth();
+  const ledgerSheets = findLedgerSheets(baseDate);
+  
+  if (ledgerSheets.length === 0) {
+    ui.alert('분석 결과', '거래처원장 시트를 찾을 수 없습니다.', ui.ButtonSet.OK);
+    return;
+  }
+  
+  let report = '📊 거래처원장 분석 보고서\n';
+  report += `기준: ${baseDate.year}년 ${baseDate.month}월\n\n`;
+  
+  ledgerSheets.forEach(sheet => {
+    const sheetName = sheet.getName();
+    const sheetType = detectSheetType(sheetName);
+    const isTaxable = sheetType === '약품_과세';
+    
+    report += `\n📋 ${sheetName}\n`;
+    report += `  📌 타입: ${sheetType}\n`;
+    
+    if (isTaxable) {
+      report += `  ⚠️ 과세 시트 (단가에 VAT 포함)\n`;
+      report += `     → 공급가액 = 수량 × (단가÷1.1)\n`;
+    } else if (sheetType === '약품_영세') {
+      report += `  ✅ 영세 시트 (VAT 0%)\n`;
+      report += `     → 공급가액 = 수량 × 단가\n`;
+    } else {
+      report += `  ✅ 일반 시트\n`;
+      report += `     → 공급가액 = 수량 × 단가\n`;
+    }
+    
+    const dataInfo = findDataRange(sheet);
+    if (dataInfo) {
+      report += `  ✅ 데이터 영역: ${dataInfo.startRow}~${dataInfo.endRow}행\n`;
+      
+      const headerInfo = analyzeHeaders(sheet, dataInfo.headerRow);
+      if (headerInfo.valid) {
+        report += `  ✅ 필수 열 확인됨\n`;
+      } else {
+        report += `  ❌ 필수 열 누락\n`;
+      }
+    } else {
+      report += `  ❌ 데이터 영역을 찾을 수 없음\n`;
+    }
+  });
+  
+  ui.alert('거래처원장 분석', report, ui.ButtonSet.OK);
+}
