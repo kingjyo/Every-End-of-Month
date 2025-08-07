@@ -1,0 +1,350 @@
+/**
+ * 시트 관리 모듈 v2.0
+ * 
+ * 시트 삭제, 초기화 등 시트 관리 기능
+ * 데이터 정리는 SupplierLedger.gs에서 처리
+ */
+
+// ===============================================
+// 시트 보호 관리
+// ===============================================
+
+/**
+ * 보호해야 할 시트 목록
+ */
+function getProtectedSheetNames() {
+  return [
+    '총 정리 표', '총정리표', '총 정리표', '총정리 표',
+    '약품 정리 표', '약품정리표', '약품 정리표', '약품정리 표',
+    '사료 정리 표', '사료정리표', '사료 정리표', '사료정리 표',
+    '_Debug_Log', '임시시트'
+  ];
+}
+
+/**
+ * 시트가 보호 대상인지 확인
+ */
+function isProtectedSheet(sheetName) {
+  const protectedNames = getProtectedSheetNames();
+  return protectedNames.some(protected => 
+    sheetName.toLowerCase().includes(protected.toLowerCase())
+  );
+}
+
+// ===============================================
+// 시트 삭제 기능
+// ===============================================
+
+/**
+ * 가져온 시트 삭제 (보호 시트 제외)
+ */
+function deleteImportedSheets() {
+  const ui = SpreadsheetApp.getUi();
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = spreadsheet.getSheets();
+  
+  // 삭제 가능한 시트 찾기
+  const deletableSheets = sheets.filter(sheet => !isProtectedSheet(sheet.getName()));
+  
+  if (deletableSheets.length === 0) {
+    ui.alert('삭제할 시트 없음', '삭제 가능한 시트가 없습니다.', ui.ButtonSet.OK);
+    return;
+  }
+  
+  // 삭제 확인
+  const response = ui.alert(
+    '시트 삭제 확인',
+    `${deletableSheets.length}개 시트를 삭제하시겠습니까?\n\n` +
+    deletableSheets.slice(0, 10).map(s => '• ' + s.getName()).join('\n') +
+    (deletableSheets.length > 10 ? `\n... 외 ${deletableSheets.length - 10}개` : ''),
+    ui.ButtonSet.YES_NO
+  );
+  
+  if (response === ui.Button.YES) {
+    performSheetDeletion(deletableSheets);
+  }
+}
+
+/**
+ * 시트 삭제 실행
+ */
+function performSheetDeletion(sheetsToDelete) {
+  const ui = SpreadsheetApp.getUi();
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  
+  // 최소 1개 시트는 남겨야 함
+  const allSheets = spreadsheet.getSheets();
+  if (sheetsToDelete.length >= allSheets.length) {
+    spreadsheet.insertSheet('임시시트');
+  }
+  
+  let deletedCount = 0;
+  const errors = [];
+  
+  sheetsToDelete.forEach(sheet => {
+    try {
+      spreadsheet.deleteSheet(sheet);
+      deletedCount++;
+      logDebug('시트 삭제', sheet.getName());
+    } catch (error) {
+      errors.push(`${sheet.getName()}: ${error.toString()}`);
+    }
+  });
+  
+  // 결과 표시
+  if (errors.length > 0) {
+    ui.alert(
+      '부분 완료',
+      `${deletedCount}개 시트 삭제됨\n\n오류:\n${errors.join('\n')}`,
+      ui.ButtonSet.OK
+    );
+  } else {
+    ui.alert('완료', `${deletedCount}개 시트가 삭제되었습니다.`, ui.ButtonSet.OK);
+  }
+}
+
+// ===============================================
+// 시트 초기화
+// ===============================================
+
+/**
+ * 전체 초기화 (빠른 버전) - UI 없이 실행
+ */
+function quickReset() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = spreadsheet.getSheets();
+  
+  // 필수 시트 확인 및 생성
+  const mainProtectedSheets = ['총 정리 표', '약품 정리 표', '사료 정리 표'];
+  
+  mainProtectedSheets.forEach(sheetName => {
+    let found = false;
+    
+    // 다양한 형식 확인
+    const variations = [
+      sheetName,
+      sheetName.replace(/ /g, ''),
+      sheetName.replace('표', ' 표')
+    ];
+    
+    for (const variation of variations) {
+      if (spreadsheet.getSheetByName(variation)) {
+        found = true;
+        break;
+      }
+    }
+    
+    if (!found) {
+      const newSheet = spreadsheet.insertSheet(sheetName);
+      
+      // 총 정리 표 초기 설정
+      if (sheetName === '총 정리 표') {
+        newSheet.getRange('C1').setValue('기준 날짜');
+        newSheet.getRange('D1').setValue(new Date().getFullYear());
+        newSheet.getRange('F1').setValue(new Date().getMonth() + 1);
+      }
+      
+      logDebug('시트 생성', sheetName);
+    }
+  });
+  
+  // 삭제할 시트 찾기
+  let deletedCount = 0;
+  
+  sheets.forEach(sheet => {
+    if (!isProtectedSheet(sheet.getName())) {
+      try {
+        spreadsheet.deleteSheet(sheet);
+        deletedCount++;
+      } catch (error) {
+        logDebug('삭제 실패', sheet.getName());
+      }
+    }
+  });
+  
+  return deletedCount;
+}
+
+/**
+ * 전체 초기화 - 정리 표들만 남기기 (UI 포함)
+ */
+function resetToSummarySheetOnly() {
+  const ui = SpreadsheetApp.getUi();
+  
+  // 이중 확인
+  const warning = ui.alert(
+    '⚠️ 전체 초기화',
+    '정리 표를 제외한 모든 시트가 삭제됩니다!\n\n' +
+    '보존되는 시트:\n' +
+    '• 총 정리 표\n' +
+    '• 약품 정리 표\n' +
+    '• 사료 정리 표\n\n' +
+    '계속하시겠습니까?',
+    ui.ButtonSet.YES_NO
+  );
+  
+  if (warning !== ui.Button.YES) return;
+  
+  const confirm = ui.alert(
+    '🔴 최종 확인',
+    '정말로 초기화하시겠습니까?\n삭제된 시트는 복구할 수 없습니다!',
+    ui.ButtonSet.YES_NO
+  );
+  
+  if (confirm !== ui.Button.YES) return;
+  
+  try {
+    const deletedCount = quickReset();
+    const baseDate = getBaseYearMonth();
+    
+    ui.alert(
+      '✅ 초기화 완료',
+      `${deletedCount}개 시트가 삭제되었습니다.\n\n` +
+      `현재 설정:\n` +
+      `• 기준 년월: ${baseDate.year}년 ${baseDate.month}월\n\n` +
+      `이제 새로운 월 마감 작업을 시작할 수 있습니다!`,
+      ui.ButtonSet.OK
+    );
+    
+  } catch (error) {
+    ui.alert('오류', `초기화 중 오류: ${error.toString()}`, ui.ButtonSet.OK);
+  }
+}
+
+// ===============================================
+// 시트 상태 확인
+// ===============================================
+
+/**
+ * 시트 상태 확인
+ */
+function checkSheetStatus() {
+  const ui = SpreadsheetApp.getUi();
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = spreadsheet.getSheets();
+  const baseDate = getBaseYearMonth();
+  
+  // 시트 분류
+  const categorized = categorizeSheets(sheets);
+  
+  // HTML 보고서 생성
+  const html = createSheetStatusHTML(categorized, baseDate);
+  const htmlOutput = HtmlService.createHtmlOutput(html)
+    .setWidth(600)
+    .setHeight(500);
+  
+  ui.showModalDialog(htmlOutput, '시트 상태 보고서');
+}
+
+/**
+ * 시트 분류
+ */
+function categorizeSheets(sheets) {
+  const categories = {
+    protected: [],
+    supplierLedgers: [],
+    purchaseRecords: [],
+    invoices: [],
+    feedRecords: [],
+    other: []
+  };
+  
+  sheets.forEach(sheet => {
+    const name = sheet.getName();
+    const nameLower = name.toLowerCase();
+    
+    if (isProtectedSheet(name)) {
+      categories.protected.push(name);
+    } else if (nameLower.includes('거래처원장') || nameLower.includes('원장')) {
+      categories.supplierLedgers.push(name);
+    } else if (nameLower.includes('구매내역')) {
+      categories.purchaseRecords.push(name);
+    } else if (nameLower.includes('청구서')) {
+      categories.invoices.push(name);
+    } else if (nameLower.includes('사료내역')) {
+      categories.feedRecords.push(name);
+    } else {
+      categories.other.push(name);
+    }
+  });
+  
+  return categories;
+}
+
+/**
+ * 시트 상태 HTML 생성
+ */
+function createSheetStatusHTML(categories, baseDate) {
+  const totalSheets = Object.values(categories).reduce((sum, arr) => sum + arr.length, 0);
+  
+  return `
+    <style>
+      body { font-family: 'Segoe UI', Tahoma, sans-serif; padding: 20px; }
+      h2 { color: #1a73e8; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; }
+      .info-box { background: #e8f4f8; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+      .category { margin-bottom: 20px; }
+      .category-title { font-weight: bold; color: #333; margin-bottom: 8px; }
+      .sheet-list { margin-left: 20px; }
+      .sheet-item { color: #666; margin: 4px 0; }
+      .empty { color: #999; font-style: italic; }
+      .stats { background: #f5f5f5; padding: 10px; border-radius: 5px; margin-top: 20px; }
+    </style>
+    
+    <h2>📊 시트 상태 보고서</h2>
+    
+    <div class="info-box">
+      <strong>기준 년월:</strong> ${baseDate.year}년 ${baseDate.month}월<br>
+      <strong>전체 시트:</strong> ${totalSheets}개
+    </div>
+    
+    <div class="category">
+      <div class="category-title">🔒 보호된 시트 (${categories.protected.length}개)</div>
+      <div class="sheet-list">
+        ${categories.protected.map(name => `<div class="sheet-item">• ${name}</div>`).join('') || '<div class="empty">없음</div>'}
+      </div>
+    </div>
+    
+    <div class="category">
+      <div class="category-title">📋 거래처원장 (${categories.supplierLedgers.length}개)</div>
+      <div class="sheet-list">
+        ${categories.supplierLedgers.map(name => `<div class="sheet-item">• ${name}</div>`).join('') || '<div class="empty">없음</div>'}
+      </div>
+    </div>
+    
+    <div class="category">
+      <div class="category-title">📄 구매내역서 (${categories.purchaseRecords.length}개)</div>
+      <div class="sheet-list">
+        ${categories.purchaseRecords.map(name => `<div class="sheet-item">• ${name}</div>`).join('') || '<div class="empty">없음</div>'}
+      </div>
+    </div>
+    
+    <div class="category">
+      <div class="category-title">🧾 청구서 (${categories.invoices.length}개)</div>
+      <div class="sheet-list">
+        ${categories.invoices.map(name => `<div class="sheet-item">• ${name}</div>`).join('') || '<div class="empty">없음</div>'}
+      </div>
+    </div>
+    
+    <div class="category">
+      <div class="category-title">🌾 사료내역서 (${categories.feedRecords.length}개)</div>
+      <div class="sheet-list">
+        ${categories.feedRecords.map(name => `<div class="sheet-item">• ${name}</div>`).join('') || '<div class="empty">없음</div>'}
+      </div>
+    </div>
+    
+    ${categories.other.length > 0 ? `
+      <div class="category">
+        <div class="category-title">❓ 기타 (${categories.other.length}개)</div>
+        <div class="sheet-list">
+          ${categories.other.map(name => `<div class="sheet-item">• ${name}</div>`).join('')}
+        </div>
+      </div>
+    ` : ''}
+    
+    <div class="stats">
+      <strong>통계:</strong><br>
+      • 데이터 시트: ${totalSheets - categories.protected.length}개<br>
+      • 거래처원장 처리 가능: ${categories.supplierLedgers.length}개
+    </div>
+  `;
+}
