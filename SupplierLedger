@@ -1,395 +1,912 @@
 /**
- * 거래처원장 데이터 정리 모듈 v3.1
+ * 제동목장 월말 마감작업 자동화 시스템 v2.3
  * 
  * 주요 기능:
- * 1. 거래처원장 시트 자동 탐지
- * 2. 공급가액 계산 
- *    - 일반: 수량 × 단가
- *    - 과세: 수량 × (단가 ÷ 1.1)
- * 3. 잔액 누적 계산
- * 4. 품명/적요 표준화
- * 5. 합계 자동 추가
+ * 1. 엑셀 파일 자동 가져오기 (기준 년/월 필터링)
+ * 2. 거래처원장 자동 정리 (금액 계산, 품명 표준화)
+ * 3. 전체 초기화 (총 정리 표만 남기기)
+ * 4. 월말 마감 전체 프로세스
+ * 5. ERROR 값 자동 정리
+ * 6. Google Docs 문서 생성 (개발 예정)
  * 
- * 이 모듈은 데이터만 정리하며, 시트 삭제나 관리는 하지 않음
- */
+ * 사용법:
+ * - 메뉴 > "📊 마감작업 자동화" > "🔄 월말 마감 전체 프로세스" 실행
+ * - 또는 각 기능을 개별적으로 실행
 
 /**
- * 거래처원장 정리 메인 함수
+ * 스프레드시트 열 때 커스텀 메뉴 생성
  */
-function processSupplierLedgers() {
+function onOpen() {
   const ui = SpreadsheetApp.getUi();
   
+  ui.createMenu('📊 마감작업 자동화')
+    .addItem('🚀 엑셀 파일 가져오기', 'showExcelImporter')
+    .addItem('🔄 월말 마감 전체 프로세스', 'runMonthlyClosingProcess')
+    .addSeparator()
+    .addSubMenu(ui.createMenu('📁 시트 관리')
+      .addItem('📤 엑셀 데이터 가져오기', 'showExcelImporter')
+      .addItem('🔧 ERROR 값 정리', 'cleanCurrentErrors')
+      .addItem('📋 현재 시트 목록 보기', 'showSheetsList')
+      .addItem('🗑️ 가져온 시트 모두 삭제', 'deleteImportedSheets')
+      .addItem('⚠️ 전체 초기화 (총 정리 표만 남기기)', 'resetToSummarySheetOnly'))
+    .addSeparator()
+    .addSubMenu(ui.createMenu('📝 데이터 정리 및 문서 작업')
+      .addItem('💼 거래처원장 정리', 'processSupplierLedgers')
+      .addItem('📊 총 정리 표 데이터 채우기', 'fillSummaryTableData')
+      .addSeparator()
+      .addItem('📄 자재 구매 세부 내역 생성', 'createPurchaseDetails')
+      .addItem('📄 자재입고 확인내역 생성', 'createReceiptConfirmation')
+      .addItem('📄 업무대행료 정산 생성', 'createServiceFeeSettlement')
+      .addItem('📦 모든 문서 한번에 생성', 'createAllDocuments'))
+    .addSeparator()
+    .addSubMenu(ui.createMenu('⚙️ 설정')
+      .addItem('📅 기준 년/월 확인 및 설정', 'checkAndSetBaseDate')
+      .addItem('⏭️ 다음 월로 자동 설정', 'setNextMonthMenu')
+      .addItem('🔍 디버그 로그 보기', 'showDebugLogs')
+      .addItem('🗑️ 디버그 로그 초기화', 'clearDebugLogs')
+      .addSeparator()
+      .addItem('🔬 거래처원장 분석 (테스트)', 'analyzeSupplierLedgers'))
+    .addSeparator()
+    .addItem('❓ 도움말', 'showHelp')
+    .addToUi();
+    
+  // 초기 설정 확인
+  checkInitialSetup();
+}
+
+/**
+ * 웹 앱 실행 시 HTML 페이지를 표시
+ */
+function doGet() {
+  return HtmlService.createHtmlOutputFromFile('index')
+      .setTitle('엑셀 데이터 가져오기')
+      .setWidth(900)
+      .setHeight(700)
+      .setSandboxMode(HtmlService.SandboxMode.IFRAME);
+}
+
+/**
+ * 기준 년/월 가져오기
+ * @return {object} {year: 'YYYY', month: 'MM', yearShort: 'YY', monthShort: 'M'}
+ */
+function getBaseYearMonth() {
   try {
-    logDebug('거래처원장 정리', '시작');
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    
+    // 총 정리 표 시트 찾기
+    let summarySheet = null;
+    const possibleNames = ['총 정리 표', '총정리표', '총 정리표', '총정리 표'];
+    
+    for (const name of possibleNames) {
+      try {
+        summarySheet = spreadsheet.getSheetByName(name);
+        if (summarySheet) {
+          logDebug('기준 년월 조회', `시트 발견: ${name}`);
+          break;
+        }
+      } catch (e) {
+        // 계속 진행
+      }
+    }
+    
+    if (!summarySheet) {
+      // 총 정리 표가 없으면 현재 날짜 기준으로 반환
+      const today = new Date();
+      const year = today.getFullYear().toString();
+      const month = (today.getMonth() + 1).toString().padStart(2, '0');
+      
+      logDebug('기준 년월 조회', '총 정리 표 없음 - 현재 날짜 사용');
+      
+      return {
+        year: year,
+        month: month,
+        yearShort: year.substring(2),
+        monthShort: parseInt(month).toString()
+      };
+    }
+    
+    // D1에서 기준 년도, F1에서 기준 월 가져오기
+    const yearValue = summarySheet.getRange('D1').getValue();
+    const monthValue = summarySheet.getRange('F1').getValue();
+    
+    // 값 검증 및 포맷팅
+    let year = yearValue.toString();
+    let month = monthValue.toString();
+    
+    // 숫자만 추출
+    year = year.replace(/[^0-9]/g, '');
+    month = month.replace(/[^0-9]/g, '');
+    
+    // 4자리 연도 확인
+    if (year.length === 2) {
+      year = '20' + year;
+    } else if (year.length !== 4) {
+      throw new Error('올바른 연도 형식이 아닙니다');
+    }
+    
+    // 월 패딩
+    month = month.padStart(2, '0');
+    
+    const result = {
+      year: year,
+      month: month,
+      yearShort: year.substring(2),
+      monthShort: parseInt(month).toString()
+    };
+    
+    logDebug('기준 년월 조회', `${result.year}년 ${result.month}월 (${result.yearShort}.${result.monthShort})`);
+    
+    return result;
+    
+  } catch (error) {
+    logDebug('기준 년월 오류', error.toString());
+    
+    // 오류 시 현재 날짜 반환
+    const today = new Date();
+    const year = today.getFullYear().toString();
+    const month = (today.getMonth() + 1).toString().padStart(2, '0');
+    
+    return {
+      year: year,
+      month: month,
+      yearShort: year.substring(2),
+      monthShort: parseInt(month).toString()
+    };
+  }
+}
+
+/**
+ * 시트 이름이 기준 년/월과 일치하는지 확인
+ * @param {string} sheetName - 시트 이름
+ * @param {string} fileName - 파일 이름
+ * @param {object} baseDate - 기준 년/월 정보
+ * @return {boolean} 가져와야 할 시트인지 여부
+ */
+function shouldImportSheet(sheetName, fileName, baseDate) {
+  try {
+    const sheetNameLower = sheetName.toLowerCase();
+    const fileNameLower = fileName.toLowerCase();
+    
+    // 청구서나 사료내역서는 모두 가져오기
+    if (fileNameLower.includes('청구서') || fileNameLower.includes('사료내역서')) {
+      logDebug('시트 필터', `${sheetName} - 청구서/사료내역서 파일, 가져오기`);
+      return true;
+    }
+    
+    // 거래처원장 파일인 경우: YY.MM 형식 확인
+    if (fileNameLower.includes('거래처원장')) {
+      const pattern1 = `${baseDate.yearShort}.${baseDate.month}`; // 24.07
+      const pattern2 = `${baseDate.yearShort}.${baseDate.monthShort}`; // 24.7
+      
+      if (sheetName.includes(pattern1) || sheetName.includes(pattern2)) {
+        logDebug('시트 필터', `${sheetName} - 거래처원장 일치, 가져오기`);
+        return true;
+      } else {
+        logDebug('시트 필터', `${sheetName} - 거래처원장 불일치, 건너뛰기`);
+        return false;
+      }
+    }
+    
+    // 구매내역서 파일인 경우: YY.M 시트와 "YY.M월 구매내역서" 시트 모두 가져오기
+    if (fileNameLower.includes('구매내역서')) {
+      // 정확한 패턴 매칭
+      const pattern1 = `${baseDate.yearShort}.${baseDate.monthShort}`;
+      const pattern2 = `${baseDate.yearShort}.${baseDate.month}`;
+      
+      // 시트명이 정확히 "YY.M" 형식인 경우
+      if (sheetName === pattern1 || sheetName === pattern2) {
+        logDebug('시트 필터', `${sheetName} - 구매내역서 YY.M 형식 일치, 가져오기`);
+        return true;
+      }
+      
+      // "YY.M월 구매내역서" 형식인 경우
+      if (sheetName.includes(pattern1 + '월 구매내역서') || 
+          sheetName.includes(pattern2 + '월 구매내역서')) {
+        logDebug('시트 필터', `${sheetName} - 구매내역서 YY.M월 형식 일치, 가져오기`);
+        return true;
+      }
+      
+      logDebug('시트 필터', `${sheetName} - 구매내역서 불일치, 건너뛰기`);
+      return false;
+    }
+    
+    // 기타 파일은 기준 년/월이 포함되어 있으면 가져오기
+    const yearMonthPatterns = [
+      `${baseDate.yearShort}.${baseDate.month}`,
+      `${baseDate.yearShort}.${baseDate.monthShort}`,
+      `${baseDate.year}.${baseDate.month}`,
+      `${baseDate.year}.${baseDate.monthShort}`
+    ];
+    
+    for (const pattern of yearMonthPatterns) {
+      if (sheetName.includes(pattern)) {
+        logDebug('시트 필터', `${sheetName} - 패턴 일치 (${pattern}), 가져오기`);
+        return true;
+      }
+    }
+    
+    // 일치하지 않으면 건너뛰기
+    logDebug('시트 필터', `${sheetName} - 일치 패턴 없음, 건너뛰기`);
+    return false;
+    
+  } catch (error) {
+    logDebug('시트 필터 오류', `${sheetName}: ${error.toString()}`);
+    // 오류 시 안전하게 가져오기
+    return true;
+  }
+}
+
+/**
+ * 엑셀 파일 데이터를 현재 스프레드시트에 가져오기
+ * @param {string} base64Data - Base64로 인코딩된 파일 데이터
+ * @param {string} fileName - 원본 파일명
+ * @return {object} 가져오기 결과
+ */
+function importExcelToCurrentSheet(base64Data, fileName) {
+  let tempExcelFile = null;
+  let tempSpreadsheetId = null;
+  
+  try {
+    logDebug('엑셀 가져오기 시작', fileName);
     
     // 기준 년/월 가져오기
     const baseDate = getBaseYearMonth();
+    logDebug('기준 년월 설정', `${baseDate.year}년 ${baseDate.month}월`);
     
-    // 거래처원장 시트 찾기
-    const ledgerSheets = findLedgerSheets(baseDate);
+    // 1. Base64를 Blob으로 변환
+    const blob = Utilities.newBlob(Utilities.base64Decode(base64Data));
+    blob.setName(fileName);
     
-    if (ledgerSheets.length === 0) {
+    // 2. 파일 확장자 확인
+    const fileExtension = fileName.split('.').pop().toLowerCase();
+    if (fileExtension !== 'xlsx' && fileExtension !== 'xls') {
+      throw new Error('엑셀 파일만 가져올 수 있습니다 (.xlsx, .xls)');
+    }
+    
+    // 3. 현재 스프레드시트 가져오기
+    const currentSpreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    
+    // 4. 임시 엑셀 파일 생성
+    logDebug('임시 파일 생성', fileName);
+    tempExcelFile = DriveApp.createFile(blob);
+    const tempExcelFileId = tempExcelFile.getId();
+    
+    // 5. Drive API v3로 엑셀을 구글 시트로 변환
+    logDebug('엑셀 변환 시작', fileName);
+    
+    try {
+      const copyRequest = {
+        name: 'temp_sheet_' + new Date().getTime(),
+        mimeType: MimeType.GOOGLE_SHEETS
+      };
+      
+      const convertedFile = Drive.Files.copy(copyRequest, tempExcelFileId, {
+        supportsAllDrives: true
+      });
+      
+      tempSpreadsheetId = convertedFile.id;
+      logDebug('변환 성공 (copy)', tempSpreadsheetId);
+      
+    } catch (copyError) {
+      logDebug('copy 실패, create 시도', copyError.toString());
+      
+      const fileMetadata = {
+        name: 'temp_sheet_' + new Date().getTime(),
+        mimeType: MimeType.GOOGLE_SHEETS
+      };
+      
+      const media = tempExcelFile.getBlob();
+      
+      const convertedFile = Drive.Files.create(fileMetadata, media, {
+        supportsAllDrives: true,
+        fields: 'id'
+      });
+      
+      tempSpreadsheetId = convertedFile.id;
+      logDebug('변환 성공 (create)', tempSpreadsheetId);
+    }
+    
+    // 6. 변환된 스프레드시트 열기
+    const tempSpreadsheet = SpreadsheetApp.openById(tempSpreadsheetId);
+    
+    // 7. 파일명에서 확장자 제거
+    const baseFileName = fileName.replace(/\.[^/.]+$/, "");
+    
+    // 8. 시트 필터링 및 복사
+    const sheets = tempSpreadsheet.getSheets();
+    const importedSheetNames = [];
+    const skippedSheetNames = [];
+    
+    logDebug('시트 필터링 시작', `총 ${sheets.length}개 시트`);
+    
+    sheets.forEach((sheet) => {
+      const originalName = sheet.getName();
+      
+      // 필터링: 기준 년/월과 일치하는 시트만 가져오기
+      if (!shouldImportSheet(originalName, fileName, baseDate)) {
+        skippedSheetNames.push(originalName);
+        return; // 이 시트는 건너뛰기
+      }
+      
+      let newName = baseFileName;
+      
+      // 여러 시트가 있을 경우 시트명 추가
+      if (sheets.length > 1 && originalName !== 'Sheet1') {
+        newName = `${baseFileName}_${originalName}`;
+      }
+      
+      // 중복 이름 처리
+      let finalName = newName;
+      let counter = 1;
+      while (currentSpreadsheet.getSheetByName(finalName)) {
+        finalName = `${newName}_${counter}`;
+        counter++;
+      }
+      
+      // 시트 복사
+      const copiedSheet = sheet.copyTo(currentSpreadsheet);
+      copiedSheet.setName(finalName);
+      
+      importedSheetNames.push(finalName);
+      logDebug('시트 복사', `${originalName} → ${finalName}`);
+    });
+    
+    // 9. 임시 파일 삭제
+    logDebug('임시 파일 삭제', '시작');
+    if (tempExcelFile) {
+      tempExcelFile.setTrashed(true);
+    }
+    if (tempSpreadsheetId) {
+      DriveApp.getFileById(tempSpreadsheetId).setTrashed(true);
+    }
+    logDebug('임시 파일 삭제', '완료');
+    
+    // 10. 성공 반환
+    const message = `"${fileName}"에서 ${importedSheetNames.length}개 시트를 가져왔습니다.` +
+                   (skippedSheetNames.length > 0 ? 
+                    `\n(${skippedSheetNames.length}개 시트는 기준 월과 맞지 않아 건너뜀)` : '');
+    
+    logDebug('가져오기 완료', 
+             `가져옴: ${importedSheetNames.length}개, 건너뜀: ${skippedSheetNames.length}개`);
+    
+    return {
+      success: true,
+      fileName: fileName,
+      sheetsImported: importedSheetNames,
+      sheetsSkipped: skippedSheetNames,
+      message: message,
+      baseDate: `${baseDate.year}년 ${baseDate.month}월`
+    };
+    
+  } catch (error) {
+    // 에러 처리
+    console.error('가져오기 오류:', error);
+    logDebug('가져오기 실패', `${fileName}: ${error.toString()}`);
+    
+    // 임시 파일 정리
+    try {
+      if (tempExcelFile) {
+        tempExcelFile.setTrashed(true);
+      }
+      if (tempSpreadsheetId) {
+        DriveApp.getFileById(tempSpreadsheetId).setTrashed(true);
+      }
+    } catch (cleanupError) {
+      console.log('정리 실패:', cleanupError);
+    }
+    
+    return {
+      success: false,
+      error: error.toString(),
+      message: `가져오기 실패: ${error.toString()}`
+    };
+  }
+}
+
+/**
+ * #ERROR! 값을 정리하는 함수
+ * @param {string} sheetName - 시트 이름 (옵션)
+ */
+function cleanErrorValues(sheetName) {
+  try {
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const sheets = sheetName ? [spreadsheet.getSheetByName(sheetName)] : spreadsheet.getSheets();
+    
+    sheets.forEach(sheet => {
+      if (!sheet) return;
+      
+      const range = sheet.getDataRange();
+      const values = range.getValues();
+      const formulas = range.getFormulas();
+      
+      // 각 셀을 확인하고 #ERROR! 처리
+      for (let i = 0; i < values.length; i++) {
+        for (let j = 0; j < values[i].length; j++) {
+          // 수식이 있고 에러가 발생한 경우
+          if (formulas[i][j] && 
+              (String(values[i][j]).includes('#ERROR') || 
+               String(values[i][j]).includes('#REF') || 
+               String(values[i][j]).includes('#NAME') ||
+               String(values[i][j]).includes('#VALUE') ||
+               String(values[i][j]).includes('#DIV/0') ||
+               String(values[i][j]).includes('#NUM') ||
+               String(values[i][j]).includes('#N/A') ||
+               String(values[i][j]).includes('#NULL'))) {
+            // 에러 셀을 0 또는 빈 값으로 변경
+            values[i][j] = 0; // 또는 '' (빈 문자열)
+          }
+        }
+      }
+      
+      // 정리된 값으로 업데이트
+      range.setValues(values);
+      logDebug('ERROR 정리', `시트: ${sheet.getName()}`);
+    });
+    
+    return {
+      success: true,
+      message: 'ERROR 값이 정리되었습니다.'
+    };
+    
+  } catch (error) {
+    console.error('ERROR 정리 실패:', error);
+    return {
+      success: false,
+      error: error.toString()
+    };
+  }
+}
+
+// ===============================================
+// 메뉴 기능 함수들
+// ===============================================
+
+/**
+ * 초기 설정 확인
+ */
+function checkInitialSetup() {
+  try {
+    const baseDate = getBaseYearMonth();
+    logDebug('초기 설정', `기준 년월: ${baseDate.year}년 ${baseDate.month}월`);
+  } catch (error) {
+    logDebug('초기 설정 오류', error.toString());
+  }
+}
+
+/**
+ * 기준 년/월 확인 및 설정
+ */
+function checkAndSetBaseDate() {
+  const ui = SpreadsheetApp.getUi();
+  
+  try {
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const possibleNames = ['총 정리 표', '총정리표', '총 정리표', '총정리 표'];
+    let summarySheet = null;
+    
+    for (const name of possibleNames) {
+      summarySheet = spreadsheet.getSheetByName(name);
+      if (summarySheet) break;
+    }
+    
+    if (!summarySheet) {
+      const createResponse = ui.alert(
+        '총 정리 표 없음',
+        '총 정리 표가 없습니다. 새로 만드시겠습니까?',
+        ui.ButtonSet.YES_NO
+      );
+      
+      if (createResponse === ui.Button.YES) {
+        summarySheet = spreadsheet.insertSheet('총 정리 표');
+        summarySheet.getRange('C1').setValue('기준 날짜');
+        summarySheet.getRange('D1').setValue(new Date().getFullYear());
+        summarySheet.getRange('F1').setValue(new Date().getMonth() + 1);
+        
+        ui.alert('생성 완료', '총 정리 표가 생성되었습니다.', ui.ButtonSet.OK);
+      }
+      return;
+    }
+    
+    const baseDate = getBaseYearMonth();
+    
+    const result = ui.prompt(
+      '📅 기준 년/월 설정',
+      `현재 기준: ${baseDate.year}년 ${baseDate.month}월\n\n` +
+      `변경하려면 아래 형식으로 입력하세요:\n` +
+      `년도,월 (예: 2025,8)\n\n` +
+      `현재 값을 유지하려면 취소를 누르세요.`,
+      ui.ButtonSet.OK_CANCEL
+    );
+    
+    if (result.getSelectedButton() === ui.Button.OK) {
+      const input = result.getResponseText();
+      
+      if (input && input.includes(',')) {
+        const [yearStr, monthStr] = input.split(',');
+        const year = parseInt(yearStr.trim());
+        const month = parseInt(monthStr.trim());
+        
+        if (year >= 2020 && year <= 2030 && month >= 1 && month <= 12) {
+          summarySheet.getRange('D1').setValue(year);
+          summarySheet.getRange('F1').setValue(month);
+          
+          ui.alert(
+            '✅ 설정 완료',
+            `기준 년월이 ${year}년 ${month}월로 변경되었습니다.`,
+            ui.ButtonSet.OK
+          );
+          
+          logDebug('기준 년월 변경', `${year}년 ${month}월`);
+        } else {
+          ui.alert('오류', '올바른 년도(2020-2030)와 월(1-12)을 입력해주세요.', ui.ButtonSet.OK);
+        }
+      } else if (input) {
+        ui.alert('오류', '형식이 올바르지 않습니다. "년도,월" 형식으로 입력해주세요.', ui.ButtonSet.OK);
+      }
+    }
+    
+  } catch (error) {
+    ui.alert('오류', `기준 년/월 설정 중 오류: ${error.toString()}`, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * 디버그 로그 기록
+ */
+function logDebug(category, message) {
+  const scriptProperties = PropertiesService.getScriptProperties();
+  const logs = JSON.parse(scriptProperties.getProperty('DEBUG_LOGS') || '[]');
+  
+  logs.push({
+    timestamp: new Date().toISOString(),
+    category: category,
+    message: message
+  });
+  
+  // 최대 100개까지만 보관
+  if (logs.length > 100) {
+    logs.shift();
+  }
+  
+  scriptProperties.setProperty('DEBUG_LOGS', JSON.stringify(logs));
+  console.log(`[${category}] ${message}`);
+}
+
+/**
+ * 엑셀 가져오기 웹 앱 열기
+ */
+function showExcelImporter() {
+  const html = HtmlService.createHtmlOutputFromFile('index')
+      .setWidth(900)
+      .setHeight(700);
+  SpreadsheetApp.getUi().showModalDialog(html, '엑셀 데이터 가져오기');
+  
+  logDebug('메뉴 실행', '엑셀 가져오기 열기');
+}
+
+/**
+ * 현재 월의 ERROR 값 정리
+ */
+function cleanCurrentErrors() {
+  const ui = SpreadsheetApp.getUi();
+  
+  const response = ui.alert(
+    'ERROR 값 정리',
+    '현재 스프레드시트의 모든 시트에서 ERROR 값을 정리하시겠습니까?',
+    ui.ButtonSet.YES_NO
+  );
+  
+  if (response == ui.Button.YES) {
+    try {
+      logDebug('ERROR 정리 시작', '전체 시트');
+      
+      const result = cleanErrorValues();
+      
+      if (result.success) {
+        ui.alert('완료', 'ERROR 값이 정리되었습니다.', ui.ButtonSet.OK);
+        logDebug('ERROR 정리 완료', '전체 시트');
+      } else {
+        throw new Error(result.error);
+      }
+      
+    } catch (error) {
+      ui.alert('오류', `ERROR 정리 중 오류가 발생했습니다: ${error.toString()}`, ui.ButtonSet.OK);
+      logDebug('ERROR 정리 오류', error.toString());
+    }
+  }
+}
+
+/**
+ * 현재 스프레드시트의 시트 목록 표시
+ */
+function showSheetsList() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = spreadsheet.getSheets();
+  const baseDate = getBaseYearMonth();
+  
+  let html = '<div style="font-family: Arial, sans-serif; padding: 20px;">';
+  html += `<h2>📋 현재 시트 목록</h2>`;
+  html += `<p style="color: #666;">기준: ${baseDate.year}년 ${baseDate.month}월</p>`;
+  html += '<table style="width: 100%; border-collapse: collapse;">';
+  html += '<tr style="background: #f0f0f0;"><th style="padding: 10px; text-align: left;">시트명</th><th style="padding: 10px;">행 수</th><th style="padding: 10px;">열 수</th></tr>';
+  
+  sheets.forEach(sheet => {
+    const rows = sheet.getMaxRows();
+    const cols = sheet.getMaxColumns();
+    html += `<tr><td style="padding: 10px; border-bottom: 1px solid #ddd;">${sheet.getName()}</td>`;
+    html += `<td style="padding: 10px; border-bottom: 1px solid #ddd; text-align: center;">${rows}</td>`;
+    html += `<td style="padding: 10px; border-bottom: 1px solid #ddd; text-align: center;">${cols}</td></tr>`;
+  });
+  
+  html += '</table>';
+  html += `<p style="margin-top: 20px; color: #666;">총 ${sheets.length}개 시트</p>`;
+  html += '</div>';
+  
+  const htmlOutput = HtmlService.createHtmlOutput(html)
+      .setWidth(500)
+      .setHeight(400);
+  
+  SpreadsheetApp.getUi().showModalDialog(htmlOutput, '시트 목록');
+  logDebug('시트 목록 조회', `${sheets.length}개 시트`);
+}
+
+/**
+ * 도움말 표시
+ */
+function showHelp() {
+  const baseDate = getBaseYearMonth();
+  
+  const html = `
+    <div style="font-family: Arial, sans-serif; padding: 20px; line-height: 1.6;">
+      <h2>📚 마감작업 자동화 도움말</h2>
+      
+      <div style="background: #e8f4f8; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
+        <strong>📅 현재 기준: ${baseDate.year}년 ${baseDate.month}월</strong><br>
+        <small>(총 정리 표의 D1: 년도, F1: 월)</small>
+      </div>
+      
+      <h3>1. 엑셀 데이터 가져오기</h3>
+      <p>• <strong>엑셀 파일 가져오기</strong>: 기준 년/월에 맞는 시트만 선택적으로 가져옴</p>
+      <p>• 드래그 앤 드롭으로 여러 파일 동시 처리 가능</p>
+      
+      <h4>📌 필터링 규칙:</h4>
+      <ul style="margin-left: 20px;">
+        <li><strong>거래처원장</strong>: ${baseDate.yearShort}.${baseDate.month} 형식의 시트만</li>
+        <li><strong>구매내역서</strong>: ${baseDate.yearShort}.${baseDate.monthShort} 또는 ${baseDate.yearShort}.${baseDate.monthShort}월 구매내역서 시트만</li>
+        <li><strong>청구서/사료내역서</strong>: 모든 시트 가져오기</li>
+      </ul>
+      
+      <h3>2. 시트 관리</h3>
+      <p>• <strong>ERROR 값 정리</strong>: #ERROR!, #REF! 등의 오류 값을 자동으로 정리</p>
+      <p>• <strong>시트 목록 보기</strong>: 현재 스프레드시트의 모든 시트 확인</p>
+      <p>• <strong>가져온 시트 삭제</strong>: 불필요한 시트 일괄 삭제</p>
+      <p>• <strong style="color: #d73502;">전체 초기화</strong>: 총 정리 표만 남기고 모든 시트 삭제 (새 월 시작 시 사용)</p>
+      
+      <h3>3. 데이터 정리 및 문서 작업</h3>
+      <p>• <strong style="color: #1a73e8;">💼 거래처원장 정리</strong>: 거래처원장 시트의 금액 계산 및 품명 표준화</p>
+      <p style="margin-left: 20px; font-size: 12px; color: #666;">
+        - 공급가액 자동 계산 (중량 × 수량 × 단가)<br>
+        - 잔액 누적 계산 및 합계 추가<br>
+        - 품명/적요 표준화 (사료, 약품, 연맥 등)
+      </p>
+      <p>• <strong>총 정리 표 데이터 채우기</strong>: 가져온 시트 데이터를 종합</p>
+      <p>• 자재 구매 세부 내역 (개발 예정)</p>
+      <p>• 자재입고 확인내역 (개발 예정)</p>
+      <p>• 업무대행료 정산 (개발 예정)</p>
+      
+      <h3>💡 사용 순서</h3>
+      <ol>
+        <li><strong style="color: #d73502;">매월 시작: "전체 초기화"로 깨끗하게 시작</strong></li>
+        <li>총 정리 표 시트의 D1, F1에 기준 년/월 설정</li>
+        <li>엑셀 파일 가져오기 (자동 필터링됨)</li>
+        <li><strong style="color: #1a73e8;">💼 거래처원장 정리 실행</strong></li>
+        <li>ERROR 값 정리</li>
+        <li>문서 생성</li>
+      </ol>
+      
+      <h3>🔄 매월 작업 흐름</h3>
+      <div style="background: #f0f7ff; padding: 15px; border-radius: 5px; margin: 15px 0;">
+        <strong>월초 (새 마감 시작)</strong><br>
+        1️⃣ "🔄 월말 마감 전체 프로세스" 또는 "⚠️ 전체 초기화" 실행<br>
+        2️⃣ D1, F1에 새 월 입력 또는 "⏭️ 다음 월로 자동 설정" 클릭<br>
+        3️⃣ 거래처 엑셀 파일들 드래그 앤 드롭<br>
+        4️⃣ 자동으로 해당 월 데이터만 가져옴<br>
+        5️⃣ <strong style="color: #1a73e8;">💼 거래처원장 정리 실행</strong><br>
+        6️⃣ ERROR 값 정리<br>
+        7️⃣ 문서 생성 및 마감 완료
+      </div>
+      
+      <h3>💡 프로 팁</h3>
+      <div style="background: #fffbe6; padding: 15px; border-radius: 5px; margin: 15px 0;">
+        <strong>🚀 빠른 시작:</strong> "🔄 월말 마감 전체 프로세스"를 실행하면 초기화부터 파일 가져오기까지 한 번에!<br><br>
+        <strong>⏰ 시간 절약:</strong> 매월 초 "전체 초기화" → "다음 월로 자동 설정" → "엑셀 가져오기"<br><br>
+        <strong>🎯 추천 워크플로우:</strong><br>
+        월초 1일: 전체 초기화 → 다음 월 설정<br>
+        월말 28일경: 엑셀 파일 수령 → 가져오기 → 문서 생성
+      </div>
+      
+      <hr style="margin: 20px 0;">
+      <p style="color: #666;">버전 2.3 | 제동목장 마감작업 자동화 시스템</p>
+      <p style="color: #999; font-size: 11px;">
+        • v2.3: 거래처원장 자동 정리 기능 추가<br>
+        • v2.2: 월말 마감 전체 프로세스 추가<br>
+        • v2.1: 전체 초기화 기능 추가<br>
+        • v2.0: 기준 년/월 자동 필터링<br>
+        • v1.0: 기본 엑셀 가져오기
+      </p>
+    </div>
+  `;
+  
+  const htmlOutput = HtmlService.createHtmlOutput(html)
+      .setWidth(650)
+      .setHeight(600);
+  
+  SpreadsheetApp.getUi().showModalDialog(htmlOutput, '도움말');
+  logDebug('메뉴 실행', '도움말 표시');
+}
+
+// ===============================================
+// 문서 작업 관련 함수
+// ===============================================
+
+/**
+ * 총 정리 표에 데이터 채우기
+ */
+function fillSummaryTableData() {
+  const ui = SpreadsheetApp.getUi();
+  
+  try {
+    // 현재 스프레드시트에서 "총 정리 표" 시트 찾기
+    const activeSpreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    let summarySheet = null;
+    
+    // "총 정리 표" 또는 유사한 이름의 시트 찾기
+    const sheetNames = ['총 정리 표', '총정리표', '총 정리표', '총정리 표'];
+    for (const name of sheetNames) {
+      try {
+        summarySheet = activeSpreadsheet.getSheetByName(name);
+        if (summarySheet) break;
+      } catch (e) {
+        // 시트가 없으면 계속 진행
+      }
+    }
+    
+    if (!summarySheet) {
       ui.alert(
-        '시트 없음',
-        '거래처원장 시트를 찾을 수 없습니다.',
+        '시트 없음', 
+        '"총 정리 표" 시트를 찾을 수 없습니다.\n먼저 "총 정리 표" 시트를 만들어주세요.', 
+        ui.ButtonSet.OK
+      );
+      logDebug('총 정리 표 데이터 채우기', '시트를 찾을 수 없음');
+      return;
+    }
+    
+    // 모든 시트를 데이터 소스로 사용 (총 정리 표 제외)
+    const allSheets = activeSpreadsheet.getSheets();
+    const sourceSheets = allSheets.filter(sheet => {
+      const sheetName = sheet.getName();
+      // 총 정리 표와 임시시트는 제외
+      return !sheetName.includes('총 정리') && !sheetName.includes('총정리') && sheetName !== '임시시트';
+    });
+    
+    if (sourceSheets.length === 0) {
+      ui.alert(
+        '데이터 없음', 
+        '데이터를 가져올 시트를 찾을 수 없습니다.\n엑셀 파일을 먼저 가져와주세요.', 
         ui.ButtonSet.OK
       );
       return;
     }
     
-    // 처리 확인
     const response = ui.alert(
-      '💼 거래처원장 정리',
-      `${ledgerSheets.length}개의 거래처원장 시트를 발견했습니다:\n\n` +
-      `${ledgerSheets.map(s => '• ' + s.getName()).join('\n')}\n\n` +
-      `작업 내용:\n` +
-      `• 공급가액 자동 계산\n` +
-      `  - 일반/영세: 수량 × 단가\n` +
-      `  - 과세: 수량 × (단가 ÷ 1.1)\n` +
-      `• 부가세 = 공급가액 × 10% 계산\n` +
-      `• 품명/적요 표준화\n` +
-      `• 잔액 누적 계산\n\n` +
-      `데이터를 정리하시겠습니까?`,
+      '데이터 채우기 확인',
+      `"${summarySheet.getName()}" 시트에 데이터를 채우시겠습니까?\n\n` +
+      `사용 가능한 시트 (${sourceSheets.length}개):\n${sourceSheets.map(s => s.getName()).join(', ')}`,
       ui.ButtonSet.YES_NO
     );
     
-    if (response !== ui.Button.YES) {
-      return;
+    if (response == ui.Button.YES) {
+      ui.alert(
+        '준비 중', 
+        '총 정리 표 구조를 먼저 알려주시면 데이터를 채워넣겠습니다.\n\n' +
+        '필요한 정보:\n' +
+        '1. 총 정리 표의 열 구조\n' +
+        '2. 각 열에 들어갈 데이터의 출처 시트\n' +
+        '3. 데이터 매칭 규칙', 
+        ui.ButtonSet.OK
+      );
+      
+      logDebug('총 정리 표 데이터 채우기', `시트 발견: ${summarySheet.getName()}, 소스: ${sourceSheets.length}개`);
     }
-    
-    // 각 시트 처리
-    const results = [];
-    let totalProcessed = 0;
-    let totalAmount = 0;
-    
-    ledgerSheets.forEach(sheet => {
-      try {
-        const result = processLedgerSheet(sheet);
-        results.push(result);
-        totalProcessed += result.processedRows;
-        totalAmount += result.totalAmount;
-        
-        logDebug('시트 처리 완료', 
-                 `${sheet.getName()}: ${result.processedRows}행, ${formatAmount(result.totalAmount)}원`);
-        
-      } catch (error) {
-        results.push({
-          sheetName: sheet.getName(),
-          success: false,
-          error: error.toString()
-        });
-        logDebug('시트 처리 오류', `${sheet.getName()}: ${error.toString()}`);
-      }
-    });
-    
-    // 결과 표시
-    showResults(results, totalProcessed, totalAmount);
     
   } catch (error) {
-    ui.alert('오류', `거래처원장 정리 중 오류: ${error.toString()}`, ui.ButtonSet.OK);
-    logDebug('거래처원장 정리 오류', error.toString());
+    ui.alert('오류', `데이터 채우기 중 오류가 발생했습니다: ${error.toString()}`, ui.ButtonSet.OK);
+    logDebug('총 정리 표 오류', error.toString());
   }
 }
 
 /**
- * 거래처원장 시트 찾기
+ * 자재 구매 세부 내역 생성
  */
-function findLedgerSheets(baseDate) {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  const sheets = spreadsheet.getSheets();
-  const ledgerSheets = [];
-  
-  // 찾을 패턴들
-  const patterns = [
-    `거래처원장${baseDate.yearShort}.${baseDate.month}`,
-    `거래처원장${baseDate.yearShort}.${baseDate.monthShort}`,
-    `거래처원장 ${baseDate.yearShort}.${baseDate.month}`,
-    `거래처원장 ${baseDate.yearShort}.${baseDate.monthShort}`,
-    `거래처 원장${baseDate.yearShort}`,
-    `거래처원장`
-  ];
-  
-  sheets.forEach(sheet => {
-    const sheetName = sheet.getName();
-    const sheetNameLower = sheetName.toLowerCase();
-    
-    // 보호 시트는 제외 (총 정리 표 등)
-    if (sheetNameLower.includes('정리') || sheetNameLower.includes('정리표')) {
-      return;
-    }
-    
-    // 거래처원장 패턴 확인
-    const isLedger = patterns.some(pattern => 
-      sheetNameLower.includes(pattern.toLowerCase())
-    ) || sheetNameLower.includes('원장');
-    
-    if (isLedger) {
-      // 데이터 구조 확인
-      if (hasLedgerStructure(sheet)) {
-        ledgerSheets.push(sheet);
-        logDebug('거래처원장 발견', sheetName);
-      }
-    }
-  });
-  
-  return ledgerSheets;
+function createPurchaseDetails() {
+  SpreadsheetApp.getUi().alert('개발 중', '자재 구매 세부 내역 생성 기능은 개발 중입니다.', SpreadsheetApp.getUi().ButtonSet.OK);
+  logDebug('메뉴 실행', '자재 구매 세부 내역 생성 (미구현)');
 }
 
 /**
- * 거래처원장 구조인지 확인
+ * 자재입고 확인내역 생성
  */
-function hasLedgerStructure(sheet) {
-  try {
-    const data = sheet.getDataRange().getValues();
-    
-    // 처음 20행에서 "거래처 원장" 텍스트 찾기
-    for (let i = 0; i < Math.min(20, data.length); i++) {
-      for (let j = 0; j < Math.min(5, data[i].length); j++) {
-        const cellValue = String(data[i][j]).toLowerCase();
-        if (cellValue.includes('거래처') && cellValue.includes('원장')) {
-          return true;
-        }
-      }
-    }
-    
-    // 또는 헤더 키워드로 판단
-    const headerKeywords = ['수량', '단가', '공급가', '금액', '품명'];
-    let keywordCount = 0;
-    
-    for (let i = 0; i < Math.min(15, data.length); i++) {
-      const rowText = data[i].join(' ').toLowerCase();
-      headerKeywords.forEach(keyword => {
-        if (rowText.includes(keyword)) keywordCount++;
-      });
-      
-      if (keywordCount >= 3) return true;
-    }
-    
-    return false;
-    
-  } catch (error) {
-    return false;
-  }
+function createReceiptConfirmation() {
+  SpreadsheetApp.getUi().alert('개발 중', '자재입고 확인내역 생성 기능은 개발 중입니다.', SpreadsheetApp.getUi().ButtonSet.OK);
+  logDebug('메뉴 실행', '자재입고 확인내역 생성 (미구현)');
 }
 
 /**
- * 개별 거래처원장 시트 처리
+ * 업무대행료 정산 생성
  */
-function processLedgerSheet(sheet) {
-  const sheetName = sheet.getName();
-  
-  // 시트 타입 판별
-  const sheetType = detectSheetType(sheetName);
-  const isTaxable = sheetType === '약품_과세'; // 과세 시트 여부
-  
-  logDebug('시트 타입', `${sheetName}: ${sheetType} (과세: ${isTaxable})`);
-  
-  // 데이터 영역 찾기
-  const dataInfo = findDataRange(sheet);
-  if (!dataInfo) {
-    throw new Error('데이터 영역을 찾을 수 없습니다');
-  }
-  
-  // 헤더 정보 분석
-  const headerInfo = analyzeHeaders(sheet, dataInfo.headerRow);
-  if (!headerInfo.valid) {
-    throw new Error('필수 열을 찾을 수 없습니다');
-  }
-  
-  // 데이터 처리
-  let processedRows = 0;
-  let totalAmount = 0;
-  let runningBalance = 0;
-  
-  // 각 데이터 행 처리
-  for (let row = dataInfo.startRow; row <= dataInfo.endRow; row++) {
-    try {
-      // 행 데이터 가져오기
-      const rowData = sheet.getRange(row, 1, 1, sheet.getMaxColumns()).getValues()[0];
-      
-      // 빈 행 체크
-      if (isEmptyRow(rowData, headerInfo.columns)) {
-        continue;
-      }
-      
-      // 수량, 단가 가져오기
-      const quantity = parseNumber(rowData[headerInfo.columns.quantity]);
-      let unitPrice = parseNumber(rowData[headerInfo.columns.unitPrice]);
-      
-      // 중량이 있는 경우 (D열)
-      let weight = 1;
-      if (headerInfo.columns.weight !== undefined) {
-        weight = parseNumber(rowData[headerInfo.columns.weight]) || 1;
-      }
-      
-      // 공급가액 계산
-      let supplyAmount = 0;
-      
-      if (isTaxable) {
-        // 과세 시트: 단가에 부가세 포함되어 있음
-        // 공급가액 = 중량 × 수량 × (단가 ÷ 1.1)
-        const priceWithoutVAT = unitPrice / 1.1; // 부가세 제외 단가
-        const roundedPrice = Math.round(priceWithoutVAT * 10000) / 10000; // 소수점 4자리
-        supplyAmount = Math.round(weight * quantity * roundedPrice);
-        
-        logDebug('과세 계산', 
-                 `행 ${row}: 단가 ${unitPrice} → VAT제외 ${roundedPrice} × 수량 ${quantity} = ${supplyAmount}`);
-        
-      } else {
-        // 일반/영세 시트: 단가에 부가세 미포함
-        // 공급가액 = 중량 × 수량 × 단가
-        supplyAmount = Math.round(weight * quantity * unitPrice);
-      }
-      
-      if (supplyAmount > 0) {
-        // 공급가액 설정
-        sheet.getRange(row, headerInfo.columns.supplyAmount + 1).setValue(supplyAmount);
-        sheet.getRange(row, headerInfo.columns.supplyAmount + 1).setNumberFormat('#,##0');
-        
-        // 부가세 계산 (있는 경우)
-        if (headerInfo.columns.vat !== undefined) {
-          let vat = 0;
-          
-          if (isTaxable) {
-            // 과세: 부가세 별도 계산 (공급가액의 10%)
-            vat = Math.round(supplyAmount * 0.1);
-          } else if (sheetType === '약품_영세') {
-            // 영세: 부가세 0
-            vat = 0;
-          } else {
-            // 기타: 공급가액의 10%
-            vat = Math.round(supplyAmount * 0.1);
-          }
-          
-          sheet.getRange(row, headerInfo.columns.vat + 1).setValue(vat);
-          sheet.getRange(row, headerInfo.columns.vat + 1).setNumberFormat('#,##0');
-        }
-        
-        // 합계 (있는 경우)
-        if (headerInfo.columns.total !== undefined) {
-          const vat = headerInfo.columns.vat !== undefined ? 
-                      parseNumber(sheet.getRange(row, headerInfo.columns.vat + 1).getValue()) : 0;
-          const total = supplyAmount + vat;
-          
-          sheet.getRange(row, headerInfo.columns.total + 1).setValue(total);
-          sheet.getRange(row, headerInfo.columns.total + 1).setNumberFormat('#,##0');
-        }
-        
-        // 잔액 누적
-        runningBalance += supplyAmount;
-        if (headerInfo.columns.balance !== undefined) {
-          sheet.getRange(row, headerInfo.columns.balance + 1).setValue(runningBalance);
-          sheet.getRange(row, headerInfo.columns.balance + 1).setNumberFormat('#,##0');
-        }
-        
-        totalAmount += supplyAmount;
-        processedRows++;
-      }
-      
-      // 품명 표준화
-      if (headerInfo.columns.description !== undefined) {
-        const originalName = rowData[headerInfo.columns.description];
-        const standardName = standardizeItemName(originalName, sheetType);
-        if (standardName !== originalName) {
-          sheet.getRange(row, headerInfo.columns.description + 1).setValue(standardName);
-        }
-      }
-      
-    } catch (error) {
-      logDebug('행 처리 오류', `${sheetName} ${row}행: ${error.toString()}`);
-    }
-  }
-  
-  // 합계 행 추가
-  if (totalAmount > 0 && dataInfo.endRow < sheet.getMaxRows()) {
-    addTotalRow(sheet, dataInfo.endRow + 1, headerInfo.columns, totalAmount, isTaxable);
-  }
-  
-  return {
-    sheetName: sheetName,
-    sheetType: sheetType,
-    isTaxable: isTaxable,
-    success: true,
-    processedRows: processedRows,
-    totalAmount: totalAmount,
-    dataRange: `${dataInfo.startRow}~${dataInfo.endRow}행`
-  };
+function createServiceFeeSettlement() {
+  SpreadsheetApp.getUi().alert('개발 중', '업무대행료 정산 생성 기능은 개발 중입니다.', SpreadsheetApp.getUi().ButtonSet.OK);
+  logDebug('메뉴 실행', '업무대행료 정산 생성 (미구현)');
 }
 
 /**
- * 시트 타입 판별
+ * 모든 문서 한번에 생성
  */
-function detectSheetType(sheetName) {
-  const nameLower = sheetName.toLowerCase();
+function createAllDocuments() {
+  SpreadsheetApp.getUi().alert('개발 중', '모든 문서 생성 기능은 개발 중입니다.', SpreadsheetApp.getUi().ButtonSet.OK);
+  logDebug('메뉴 실행', '모든 문서 생성 (미구현)');
+}
+
+// ===============================================
+// 데이터 처리 헬퍼 함수
+// ===============================================
+
+/**
+ * 시트에서 특정 열의 데이터 가져오기
+ * @param {Sheet} sheet - 대상 시트
+ * @param {string} columnName - 열 이름 (헤더)
+ * @return {Array} 해당 열의 데이터 배열
+ */
+function getColumnData(sheet, columnName) {
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const columnIndex = headers.indexOf(columnName);
   
-  // 과세 확인이 최우선
-  if (nameLower.includes('과세')) {
-    return '약품_과세';
+  if (columnIndex === -1) {
+    logDebug('데이터 추출 오류', `"${columnName}" 열을 찾을 수 없음 - ${sheet.getName()}`);
+    return [];
   }
   
-  // 영세 확인
-  if (nameLower.includes('영세')) {
-    return '약품_영세';
+  const columnData = [];
+  for (let i = 1; i < data.length; i++) {
+    columnData.push(data[i][columnIndex]);
   }
   
-  // 기타 타입
-  if (nameLower.includes('퓨리나')) return '사료';
-  if (nameLower.includes('제축섬유질')) return '연맥';
-  if (nameLower.includes('현클리닉')) return '약품';
-  
-  return '기타';
+  return columnData;
 }
 
 /**
- * 데이터 영역 찾기
+ * 특정 조건에 맞는 데이터 찾기
+ * @param {Sheet} sheet - 대상 시트
+ * @param {string} searchColumn - 검색할 열 이름
+ * @param {any} searchValue - 검색 값
+ * @param {string} returnColumn - 반환할 열 이름
+ * @return {any} 찾은 값 또는 null
  */
-function findDataRange(sheet) {
-  const maxRows = sheet.getMaxRows();
+function findData(sheet, searchColumn, searchValue, returnColumn) {
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const searchIndex = headers.indexOf(searchColumn);
+  const returnIndex = headers.indexOf(returnColumn);
   
-  // B열에서 "거래처 원장" 찾기
-  for (let row = 1; row <= Math.min(30, maxRows); row++) {
-    const cellValue = sheet.getRange(row, 2).getValue();
-    
-    if (cellValue && String(cellValue).includes('거래처')) {
-      // 헤더는 보통 5행 아래
-      const headerRow = row + 5;
-      
-      if (headerRow > maxRows) continue;
-      
-      // 헤더 확인
-      const headerRange = sheet.getRange(headerRow, 1, 1, sheet.getMaxColumns());
-      const headers = headerRange.getValues()[0];
-      const headerText = headers.join(' ').toLowerCase();
-      
-      if (headerText.includes('날짜') || headerText.includes('품명') || headerText.includes('수량')) {
-        // 데이터 시작과 끝 찾기
-        const dataStartRow = headerRow + 1;
-        let dataEndRow = dataStartRow;
-        
-        for (let checkRow = dataStartRow; checkRow <= maxRows; checkRow++) {
-          const rowData = sheet.getRange(checkRow, 2, 1, 5).getValues()[0];
-          const hasData = rowData.some(cell => cell !== '' && cell !== null);
-          
-          if (!hasData) {
-            // 연속 2개 빈 행이면 종료
-            if (checkRow + 1 <= maxRows) {
-              const nextRowData = sheet.getRange(checkRow + 1, 2, 1, 5).getValues()[0];
-              if (!nextRowData.some(cell => cell !== '' && cell !== null)) {
-                dataEndRow = checkRow - 1;
-                break;
-              }
-            }
-          } else {
-            dataEndRow = checkRow;
-          }
-        }
-        
-        return {
-          headerRow: headerRow,
-          startRow: dataStartRow,
-          endRow: dataEndRow
-        };
-      }
+  if (searchIndex === -1 || returnIndex === -1) {
+    logDebug('데이터 검색 오류', `열을 찾을 수 없음 - ${sheet.getName()}`);
+    return null;
+  }
+  
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][searchIndex] === searchValue) {
+      return data[i][returnIndex];
     }
   }
   
@@ -397,279 +914,496 @@ function findDataRange(sheet) {
 }
 
 /**
- * 헤더 분석
+ * 데이터 합계 계산
+ * @param {Array} values - 숫자 배열
+ * @return {number} 합계
  */
-function analyzeHeaders(sheet, headerRow) {
-  const headers = sheet.getRange(headerRow, 1, 1, sheet.getMaxColumns()).getValues()[0];
-  const columns = {};
-  
-  // 각 헤더 찾기 (0-based index)
-  headers.forEach((header, index) => {
-    const h = String(header).toLowerCase().replace(/\s/g, '');
-    
-    if (h.includes('날짜') || h.includes('일자')) columns.date = index;
-    if (h.includes('품명') || h.includes('적요')) columns.description = index;
-    if (h.includes('중량') || h === '중') columns.weight = index;
-    if ((h === '수량' || h === '수' || h.includes('수량')) && !h.includes('단')) columns.quantity = index;
-    if (h.includes('단가') || h === '단') columns.unitPrice = index;
-    if (h.includes('공급가') || h === '공급액' || h === '금액') columns.supplyAmount = index;
-    if (h.includes('부가세') || h.includes('세액')) columns.vat = index;
-    if (h === '합계' || h === '총액' || h.includes('합계')) columns.total = index;
-    if (h.includes('잔액') || h.includes('잔고')) columns.balance = index;
-  });
-  
-  // 필수 열 확인
-  const valid = columns.quantity !== undefined && 
-                columns.unitPrice !== undefined && 
-                columns.supplyAmount !== undefined;
-  
-  logDebug('헤더 분석', `수량:${columns.quantity}, 단가:${columns.unitPrice}, 공급가:${columns.supplyAmount}`);
-  
-  return { valid, columns };
+function calculateSum(values) {
+  return values.reduce((sum, val) => {
+    const num = parseFloat(val);
+    return sum + (isNaN(num) ? 0 : num);
+  }, 0);
 }
 
 /**
- * 빈 행 확인
+ * 날짜 형식 변환
+ * @param {Date|string} date - 날짜
+ * @param {string} format - 형식 (예: "YYYY-MM-DD", "YY.MM")
+ * @return {string} 형식화된 날짜 문자열
  */
-function isEmptyRow(rowData, columns) {
-  // 날짜, 품명, 수량, 단가 모두 비어있으면 빈 행
-  const hasDate = columns.date !== undefined && rowData[columns.date];
-  const hasDesc = columns.description !== undefined && rowData[columns.description];
-  const hasQty = columns.quantity !== undefined && parseNumber(rowData[columns.quantity]) > 0;
-  const hasPrice = columns.unitPrice !== undefined && parseNumber(rowData[columns.unitPrice]) > 0;
+function formatDate(date, format) {
+  if (typeof date === 'string') {
+    date = new Date(date);
+  }
   
-  return !hasDate && !hasDesc && !hasQty && !hasPrice;
+  const year = date.getFullYear();
+  const month = (date.getMonth() + 1).toString().padStart(2, '0');
+  const day = date.getDate().toString().padStart(2, '0');
+  
+  return format
+    .replace('YYYY', year)
+    .replace('YY', year.toString().substr(-2))
+    .replace('MM', month)
+    .replace('M', date.getMonth() + 1)
+    .replace('DD', day)
+    .replace('D', date.getDate());
 }
 
 /**
- * 숫자 파싱
- */
-function parseNumber(value) {
-  if (typeof value === 'number') return value;
-  if (!value) return 0;
-  
-  let str = String(value);
-  str = str.replace(/[,\s원₩$]/g, '');
-  
-  if (str.startsWith('(') && str.endsWith(')')) {
-    str = '-' + str.slice(1, -1);
-  }
-  
-  const num = parseFloat(str);
-  return isNaN(num) ? 0 : num;
-}
-
-/**
- * 품명 표준화
- */
-function standardizeItemName(name, sheetType) {
-  if (!name) return '';
-  
-  let standardized = String(name).trim();
-  
-  switch(sheetType) {
-    case '사료':
-      return standardizeFeedName(standardized);
-    case '약품_영세':
-    case '약품_과세':
-    case '약품':
-      return standardizeMedicineName(standardized);
-    case '연맥':
-      return '연맥';
-    default:
-      return standardized;
-  }
-}
-
-/**
- * 사료명 표준화
- */
-function standardizeFeedName(name) {
-  // (퓨) 제거
-  name = name.replace(/[（(]퓨[)）]/g, '');
-  
-  // 송아지본 처리
-  if (name.includes('송아지본')) {
-    if (name.includes('110')) return '송아지본 110+';
-    if (name.includes('230')) return '송아지본 230+';
-  }
-  
-  // 포커스 제품
-  if (name.includes('포커스')) {
-    const isBulk = name.includes('벌크');
-    
-    if (name.includes('마무리')) return `포커스마무리 ${isBulk ? '벌크' : '지대'}`;
-    if (name.includes('육성')) {
-      if (name.includes('암/수') || name.includes('암수')) {
-        return `포커스육성(암/수) ${isBulk ? '벌크' : '지대'}`;
-      }
-      return `포커스육성 ${isBulk ? '벌크' : '지대'}`;
-    }
-    if (name.includes('임신우')) return `포커스임신우 ${isBulk ? '벌크' : '지대'}`;
-    if (name.includes('큰소')) return `포커스큰소 ${isBulk ? '벌크' : '지대'}`;
-    if (name.includes('번식우')) return `포커스번식우 ${isBulk ? '벌크' : '지대'}`;
-  }
-  
-  return name;
-}
-
-/**
- * 약품명 표준화
- */
-function standardizeMedicineName(name) {
-  // 특수 케이스
-  if (name.includes('플로리부스터-갈프')) return name;
-  
-  // 비오쓰리 특수 처리
-  if (name.includes('비오쓰리') && name.includes('(동-삼양)')) {
-    return name.replace(/\(동-삼양\)(\d+[a-zA-Z]+)/g, '(동-삼양)-$1');
-  }
-  
-  // 일반적인 경우: 약품명-규격
-  const pattern = /^([^-\d]+)(\d+[a-zA-Z]+)$/;
-  const match = name.match(pattern);
-  
-  if (match) {
-    return match[1] + '-' + match[2];
-  }
-  
-  return name;
-}
-
-/**
- * 합계 행 추가
- */
-function addTotalRow(sheet, row, columns, totalAmount, isTaxable) {
-  try {
-    // "합계" 표시
-    if (columns.description !== undefined) {
-      sheet.getRange(row, columns.description + 1).setValue('합계');
-    } else if (columns.date !== undefined) {
-      sheet.getRange(row, columns.date + 1).setValue('합계');
-    }
-    
-    // 총액 표시
-    sheet.getRange(row, columns.supplyAmount + 1).setValue(totalAmount);
-    sheet.getRange(row, columns.supplyAmount + 1).setNumberFormat('#,##0');
-    
-    // 부가세 합계 (과세인 경우만)
-    if (columns.vat !== undefined && isTaxable) {
-      const totalVat = Math.round(totalAmount * 0.1);
-      sheet.getRange(row, columns.vat + 1).setValue(totalVat);
-      sheet.getRange(row, columns.vat + 1).setNumberFormat('#,##0');
-      
-      // 전체 합계 (공급가액 + 부가세)
-      if (columns.total !== undefined) {
-        sheet.getRange(row, columns.total + 1).setValue(totalAmount + totalVat);
-        sheet.getRange(row, columns.total + 1).setNumberFormat('#,##0');
-      }
-    }
-    
-    // 서식 설정
-    sheet.getRange(row, 1, 1, sheet.getMaxColumns()).setFontWeight('bold');
-    sheet.getRange(row, 1, 1, sheet.getMaxColumns()).setBackground('#f0f0f0');
-    
-    logDebug('합계 추가', `${row}행에 ${formatAmount(totalAmount)}원 (과세: ${isTaxable})`);
-    
-  } catch (error) {
-    logDebug('합계 추가 오류', error.toString());
-  }
-}
-
-/**
- * 처리 결과 표시
- */
-function showResults(results, totalProcessed, totalAmount) {
-  const ui = SpreadsheetApp.getUi();
-  
-  let message = '📊 거래처원장 정리 완료\n\n';
-  
-  const successResults = results.filter(r => r.success);
-  const failedResults = results.filter(r => !r.success);
-  
-  if (successResults.length > 0) {
-    message += '✅ 성공적으로 처리된 시트:\n';
-    successResults.forEach(result => {
-      message += `\n📋 ${result.sheetName} (${result.sheetType})\n`;
-      if (result.isTaxable) {
-        message += `  • ⚠️ 과세 시트 (단가÷1.1 적용)\n`;
-      }
-      message += `  • 처리 범위: ${result.dataRange}\n`;
-      message += `  • 처리된 행: ${result.processedRows}개\n`;
-      message += `  • 금액 합계: ${formatAmount(result.totalAmount)}원\n`;
-    });
-  }
-  
-  if (failedResults.length > 0) {
-    message += '\n⚠️ 처리 실패:\n';
-    failedResults.forEach(result => {
-      message += `  • ${result.sheetName}: ${result.error}\n`;
-    });
-  }
-  
-  message += `\n📌 전체 요약:\n`;
-  message += `  • 처리된 행: ${totalProcessed}개\n`;
-  message += `  • 총 금액: ${formatAmount(totalAmount)}원`;
-  
-  ui.alert('거래처원장 정리 완료', message, ui.ButtonSet.OK);
-}
-
-/**
- * 금액 포맷팅
+ * 금액 형식 변환 (천단위 콤마)
+ * @param {number} amount - 금액
+ * @return {string} 형식화된 금액 문자열
  */
 function formatAmount(amount) {
-  return Math.round(amount).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return amount.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
+// ===============================================
+// 테스트 및 디버깅 함수
+// ===============================================
+
 /**
- * 거래처원장 분석 (테스트용)
+ * 월말 마감 전체 프로세스 (한 번에 실행)
+ * 이 함수를 실행하면 초기화부터 시작해서 전체 과정을 진행할 수 있음
  */
-function analyzeSupplierLedgers() {
+function runMonthlyClosingProcess() {
   const ui = SpreadsheetApp.getUi();
-  const baseDate = getBaseYearMonth();
-  const ledgerSheets = findLedgerSheets(baseDate);
   
-  if (ledgerSheets.length === 0) {
-    ui.alert('분석 결과', '거래처원장 시트를 찾을 수 없습니다.', ui.ButtonSet.OK);
+  // 현재 기준 년/월 확인
+  const currentBaseDate = getBaseYearMonth();
+  
+  const response = ui.alert(
+    '📊 월말 마감 전체 프로세스',
+    `현재 기준: ${currentBaseDate.year}년 ${currentBaseDate.month}월\n\n` +
+    '진행 순서:\n' +
+    '1. 전체 초기화 (총 정리 표만 남기기)\n' +
+    '2. 기준 년/월 확인 (필요시 다음 월로 변경)\n' +
+    '3. 엑셀 파일 가져오기 대기\n\n' +
+    '⚠️ 모든 시트가 삭제됩니다!\n' +
+    '계속하시겠습니까?',
+    ui.ButtonSet.YES_NO
+  );
+  
+  if (response !== ui.Button.YES) {
     return;
   }
   
-  let report = '📊 거래처원장 분석 보고서\n';
-  report += `기준: ${baseDate.year}년 ${baseDate.month}월\n\n`;
-  
-  ledgerSheets.forEach(sheet => {
-    const sheetName = sheet.getName();
-    const sheetType = detectSheetType(sheetName);
-    const isTaxable = sheetType === '약품_과세';
+  try {
+    // 1단계: 초기화
+    logDebug('월말 마감', '1단계: 초기화 시작');
+    const deletedCount = quickReset();
     
-    report += `\n📋 ${sheetName}\n`;
-    report += `  📌 타입: ${sheetType}\n`;
+    // 2단계: 기준 년/월 확인
+    logDebug('월말 마감', '2단계: 기준 년/월 확인');
+    const baseDate = getBaseYearMonth();
     
-    if (isTaxable) {
-      report += `  ⚠️ 과세 시트 (단가에 VAT 포함)\n`;
-      report += `     → 공급가액 = 수량 × (단가÷1.1)\n`;
-    } else if (sheetType === '약품_영세') {
-      report += `  ✅ 영세 시트 (VAT 0%)\n`;
-      report += `     → 공급가액 = 수량 × 단가\n`;
-    } else {
-      report += `  ✅ 일반 시트\n`;
-      report += `     → 공급가액 = 수량 × 단가\n`;
+    // 2-1단계: 다음 월로 변경할지 확인
+    const monthResponse = ui.alert(
+      '📅 기준 월 설정',
+      `현재 기준: ${baseDate.year}년 ${baseDate.month}월\n\n` +
+      `다음 월로 변경하시겠습니까?\n` +
+      `(YES: 다음 월로 변경, NO: 현재 월 유지)`,
+      ui.ButtonSet.YES_NO_CANCEL
+    );
+    
+    if (monthResponse === ui.Button.CANCEL) {
+      return;
     }
     
-    const dataInfo = findDataRange(sheet);
-    if (dataInfo) {
-      report += `  ✅ 데이터 영역: ${dataInfo.startRow}~${dataInfo.endRow}행\n`;
-      
-      const headerInfo = analyzeHeaders(sheet, dataInfo.headerRow);
-      if (headerInfo.valid) {
-        report += `  ✅ 필수 열 확인됨\n`;
-      } else {
-        report += `  ❌ 필수 열 누락\n`;
+    if (monthResponse === ui.Button.YES) {
+      setNextMonth(true); // silent mode로 실행
+      const newBaseDate = getBaseYearMonth();
+      ui.alert(
+        '📅 월 변경 완료',
+        `기준 년월이 ${newBaseDate.year}년 ${newBaseDate.month}월로 변경되었습니다.`,
+        ui.ButtonSet.OK
+      );
+    }
+    
+    // 최종 기준 년/월 확인
+    const finalBaseDate = getBaseYearMonth();
+    
+    // 3단계: 안내
+    ui.alert(
+      '✅ 초기화 완료',
+      `${deletedCount}개 시트가 삭제되었습니다.\n\n` +
+      `현재 설정:\n` +
+      `• 기준 년월: ${finalBaseDate.year}년 ${finalBaseDate.month}월\n` +
+      `• 필터링 패턴: ${finalBaseDate.yearShort}.${finalBaseDate.month} 또는 ${finalBaseDate.yearShort}.${finalBaseDate.monthShort}\n\n` +
+      `다음 단계:\n` +
+      `1. "엑셀 파일 가져오기" 클릭\n` +
+      `2. 거래처 엑셀 파일들 드래그 앤 드롭\n` +
+      `3. 💼 거래처원장 정리\n` +
+      `4. ERROR 값 정리\n` +
+      `5. 문서 생성`,
+      ui.ButtonSet.OK
+    );
+    
+    // 자동으로 엑셀 가져오기 다이얼로그 열기
+    Utilities.sleep(500);
+    showExcelImporter();
+    
+  } catch (error) {
+    ui.alert('오류', `프로세스 중 오류가 발생했습니다: ${error.toString()}`, ui.ButtonSet.OK);
+    logDebug('월말 마감 오류', error.toString());
+  }
+}
+
+/**
+ * 다음 월로 자동 설정 (메뉴용)
+ */
+function setNextMonthMenu() {
+  setNextMonth(false); // 알림 표시
+}
+
+/**
+ * 다음 월로 자동 설정
+ * 총 정리 표의 월을 다음 달로 자동 변경
+ * @param {boolean} silent - true면 알림 표시 안 함
+ */
+function setNextMonth(silent = false) {
+  try {
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const possibleNames = ['총 정리 표', '총정리표', '총 정리표', '총정리 표'];
+    let summarySheet = null;
+    
+    for (const name of possibleNames) {
+      summarySheet = spreadsheet.getSheetByName(name);
+      if (summarySheet) break;
+    }
+    
+    if (!summarySheet) {
+      if (!silent) {
+        SpreadsheetApp.getUi().alert('오류', '총 정리 표를 찾을 수 없습니다.', SpreadsheetApp.getUi().ButtonSet.OK);
       }
-    } else {
-      report += `  ❌ 데이터 영역을 찾을 수 없음\n`;
+      return false;
     }
+    
+    // 현재 년/월 가져오기
+    const currentYear = summarySheet.getRange('D1').getValue();
+    const currentMonth = summarySheet.getRange('F1').getValue();
+    
+    // 다음 달 계산
+    let nextYear = parseInt(currentYear);
+    let nextMonth = parseInt(currentMonth) + 1;
+    
+    if (nextMonth > 12) {
+      nextMonth = 1;
+      nextYear++;
+    }
+    
+    // 값 설정
+    summarySheet.getRange('D1').setValue(nextYear);
+    summarySheet.getRange('F1').setValue(nextMonth);
+    
+    if (!silent) {
+      SpreadsheetApp.getUi().alert(
+        '✅ 설정 완료',
+        `기준 년월이 ${nextYear}년 ${nextMonth}월로 변경되었습니다.`,
+        SpreadsheetApp.getUi().ButtonSet.OK
+      );
+    }
+    
+    logDebug('월 변경', `${currentYear}년 ${currentMonth}월 → ${nextYear}년 ${nextMonth}월`);
+    return true;
+    
+  } catch (error) {
+    if (!silent) {
+      SpreadsheetApp.getUi().alert('오류', `월 변경 중 오류: ${error.toString()}`, SpreadsheetApp.getUi().ButtonSet.OK);
+    }
+    return false;
+  }
+}
+
+/**
+ * 테스트용 함수 - 직접 파일을 지정해서 가져오기 테스트
+ * Apps Script 편집기에서 직접 실행하여 로그 확인
+ */
+function testImportExcel() {
+  console.log('========== 테스트 시작 ==========');
+  
+  try {
+    // 기준 년/월 확인
+    const baseDate = getBaseYearMonth();
+    console.log(`기준 년월: ${baseDate.year}년 ${baseDate.month}월`);
+    console.log('');
+    console.log('구매내역서에서 가져올 시트:');
+    console.log(`  ✅ "${baseDate.yearShort}.${baseDate.monthShort}" 시트`);
+    console.log(`  ✅ "${baseDate.yearShort}.${baseDate.monthShort}월 구매내역서" 시트`);
+    console.log('  (두 시트가 모두 있으면 둘 다 가져옵니다!)');
+    console.log('');
+    
+    // 테스트할 엑셀 파일을 구글 드라이브에서 찾기
+    const fileName = '7월 구매내역서.xlsx'; // 여기에 실제 파일명 입력
+    
+    console.log(`1. 파일 검색 중: ${fileName}`);
+    const files = DriveApp.getFilesByName(fileName);
+    
+    if (!files.hasNext()) {
+      console.log('❌ 파일을 찾을 수 없습니다. 구글 드라이브에 파일을 업로드하고 파일명을 확인하세요.');
+      return;
+    }
+    
+    const file = files.next();
+    console.log(`2. 파일 발견: ${file.getName()} (ID: ${file.getId()})`);
+    
+    // 파일을 Blob으로 가져오기
+    const blob = file.getBlob();
+    console.log(`3. Blob 생성 완료: ${blob.getBytes().length} bytes`);
+    
+    // Base64로 인코딩
+    const base64 = Utilities.base64Encode(blob.getBytes());
+    console.log(`4. Base64 인코딩 완료`);
+    
+    // importExcelToCurrentSheet 함수 호출
+    console.log('5. importExcelToCurrentSheet 함수 호출');
+    const result = importExcelToCurrentSheet(base64, fileName);
+    
+    console.log('6. 결과:', JSON.stringify(result, null, 2));
+    
+    if (result.success) {
+      console.log('✅ 성공적으로 가져왔습니다!');
+      console.log('가져온 시트들:', result.sheetsImported);
+      console.log('건너뛴 시트들:', result.sheetsSkipped);
+    } else {
+      console.log('❌ 가져오기 실패:', result.error);
+    }
+    
+  } catch (error) {
+    console.error('❌ 테스트 중 오류 발생:', error.toString());
+    console.error('스택 트레이스:', error.stack);
+  }
+  
+  console.log('========== 테스트 종료 ==========');
+}
+
+/**
+ * 시트 필터링 테스트
+ */
+function testSheetFiltering() {
+  console.log('========== 시트 필터링 테스트 ==========');
+  
+  const baseDate = getBaseYearMonth();
+  console.log(`기준: ${baseDate.year}년 ${baseDate.month}월`);
+  console.log(`패턴: ${baseDate.yearShort}.${baseDate.month}, ${baseDate.yearShort}.${baseDate.monthShort}`);
+  console.log('\n구매내역서는 다음 두 형식을 모두 가져옵니다:');
+  console.log(`  1) ${baseDate.yearShort}.${baseDate.monthShort} (예: 24.7)`);
+  console.log(`  2) ${baseDate.yearShort}.${baseDate.monthShort}월 구매내역서 (예: 24.7월 구매내역서)`);
+  console.log('');
+  
+  // 테스트 케이스
+  const testCases = [
+    // 거래처원장 케이스
+    { fileName: '거래처원장24.07.xlsx', sheetName: '24.07', expected: true },
+    { fileName: '거래처원장24.07.xlsx', sheetName: '24.06', expected: false },
+    { fileName: '거래처원장24.07.xlsx', sheetName: '24.7', expected: true },
+    
+    // 구매내역서 케이스 - 두 형식 모두 가져와야 함
+    { fileName: '7월 구매내역서.xlsx', sheetName: '24.7', expected: true },
+    { fileName: '7월 구매내역서.xlsx', sheetName: '24.07', expected: true },
+    { fileName: '7월 구매내역서.xlsx', sheetName: '24.7월 구매내역서', expected: true },
+    { fileName: '7월 구매내역서.xlsx', sheetName: '24.07월 구매내역서', expected: true },
+    { fileName: '7월 구매내역서.xlsx', sheetName: '24.6', expected: false },
+    { fileName: '7월 구매내역서.xlsx', sheetName: '24.6월 구매내역서', expected: false },
+    
+    // 청구서/사료내역서 케이스
+    { fileName: '7월 청구서.xlsx', sheetName: '아무거나', expected: true },
+    { fileName: '7월 사료내역서.xlsx', sheetName: '아무거나', expected: true },
+  ];
+  
+  testCases.forEach((test, index) => {
+    const result = shouldImportSheet(test.sheetName, test.fileName, baseDate);
+    const pass = result === test.expected ? '✅' : '❌';
+    console.log(`${pass} Test ${index + 1}: ${test.fileName} / ${test.sheetName} → ${result} (예상: ${test.expected})`);
   });
   
-  ui.alert('거래처원장 분석', report, ui.ButtonSet.OK);
+  console.log('\n✅ 구매내역서 파일에 "24.7"과 "24.7월 구매내역서" 시트가 모두 있으면 둘 다 가져옵니다!');
+  console.log('========== 테스트 종료 ==========');
+}
+
+/**
+ * Drive API 상태 확인
+ */
+function checkDriveAPIStatus() {
+  console.log('========== Drive API 상태 확인 ==========');
+  
+  // 1. Drive 객체 존재 확인
+  console.log('1. Drive 객체 확인:');
+  if (typeof Drive !== 'undefined') {
+    console.log('   ✅ Drive 객체 존재');
+    
+    // Drive 객체의 속성 확인
+    console.log('2. Drive 객체 속성:');
+    for (let prop in Drive) {
+      console.log(`   - ${prop}`);
+    }
+    
+    // Files 객체 확인
+    if (Drive.Files) {
+      console.log('3. Drive.Files 메서드:');
+      for (let method in Drive.Files) {
+        console.log(`   - ${method}`);
+      }
+    } else {
+      console.log('   ❌ Drive.Files 없음');
+    }
+  } else {
+    console.log('   ❌ Drive 객체가 없습니다!');
+    console.log('\n📌 해결 방법:');
+    console.log('1. Apps Script 편집기 좌측 "서비스" 클릭');
+    console.log('2. "Drive API" 검색');
+    console.log('3. "추가" 버튼 클릭');
+    console.log('4. 버전: v2 선택 (중요!)');
+    console.log('5. 식별자: "Drive" 확인');
+  }
+  
+  console.log('========== 확인 완료 ==========');
+}
+
+/**
+ * 디버그 정보 전체 출력
+ */
+function debugFullInfo() {
+  console.log('========== 전체 디버그 정보 ==========');
+  
+  // 0. 기준 년/월
+  const baseDate = getBaseYearMonth();
+  console.log('0. 기준 년월:');
+  console.log(`   - ${baseDate.year}년 ${baseDate.month}월`);
+  console.log(`   - 패턴: ${baseDate.yearShort}.${baseDate.month}, ${baseDate.yearShort}.${baseDate.monthShort}`);
+  
+  // 1. 현재 스프레드시트 정보
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  console.log('\n1. 현재 스프레드시트:');
+  console.log(`   - 이름: ${ss.getName()}`);
+  console.log(`   - ID: ${ss.getId()}`);
+  console.log(`   - URL: ${ss.getUrl()}`);
+  
+  // 2. 시트 목록
+  console.log('\n2. 시트 목록:');
+  ss.getSheets().forEach((sheet, i) => {
+    const range = sheet.getDataRange();
+    console.log(`   ${i+1}. ${sheet.getName()}`);
+    console.log(`      - 크기: ${sheet.getMaxRows()}행 × ${sheet.getMaxColumns()}열`);
+    console.log(`      - 데이터: ${range.getNumRows()}행 × ${range.getNumColumns()}열`);
+  });
+  
+  // 3. Drive API 상태
+  console.log('\n3. Drive API 상태:');
+  try {
+    Drive.Files.list({ maxResults: 1 });
+    console.log('   ✅ Drive API 활성화됨');
+  } catch (e) {
+    console.log('   ❌ Drive API 비활성화 또는 오류');
+  }
+  
+  // 4. 최근 디버그 로그
+  console.log('\n4. 최근 디버그 로그:');
+  const scriptProps = PropertiesService.getScriptProperties();
+  const logs = JSON.parse(scriptProps.getProperty('DEBUG_LOGS') || '[]');
+  logs.slice(-5).forEach(log => {
+    const time = new Date(log.timestamp).toLocaleString('ko-KR');
+    console.log(`   [${time}] ${log.category}: ${log.message}`);
+  });
+  
+  console.log('\n========== 디버그 종료 ==========');
+}
+
+/**
+ * 가져온 시트 삭제 (보호 시트 제외)
+ * Code.gs의 resetToSummarySheetOnly() 함수 바로 위나 아래에 추가
+ */
+function deleteImportedSheets() {
+  const ui = SpreadsheetApp.getUi();
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = spreadsheet.getSheets();
+  
+  // 보호할 시트 이름들
+  const protectedSheets = [
+    '총 정리 표', '총정리표', '총 정리표', '총정리 표',
+    '약품 정리 표', '약품정리표', '약품 정리표', '약품정리 표',
+    '사료 정리 표', '사료정리표', '사료 정리표', '사료정리 표',
+    '_Debug_Log', '임시시트'
+  ];
+  
+  // 삭제 가능한 시트 찾기
+  const sheetsToDelete = sheets.filter(sheet => {
+    const sheetName = sheet.getName();
+    // 보호 시트 목록에 포함된 이름이 있으면 제외
+    return !protectedSheets.some(protected => 
+      sheetName.includes(protected) || sheetName === protected
+    );
+  });
+  
+  if (sheetsToDelete.length === 0) {
+    ui.alert(
+      '삭제할 시트 없음', 
+      '삭제할 수 있는 시트가 없습니다.\n\n' +
+      '보호되는 시트:\n' +
+      '• 총 정리 표\n' +
+      '• 약품 정리 표\n' +
+      '• 사료 정리 표',
+      ui.ButtonSet.OK
+    );
+    return;
+  }
+  
+  // 삭제할 시트 목록 표시
+  const response = ui.alert(
+    '시트 삭제 확인',
+    `다음 ${sheetsToDelete.length}개 시트를 삭제하시겠습니까?\n\n` +
+    sheetsToDelete.map(s => s.getName()).slice(0, 10).join(', ') +
+    (sheetsToDelete.length > 10 ? ` 외 ${sheetsToDelete.length - 10}개` : '') +
+    '\n\n※ 총 정리 표, 약품 정리 표, 사료 정리 표는 보호됩니다.',
+    ui.ButtonSet.YES_NO
+  );
+  
+  if (response == ui.Button.YES) {
+    try {
+      // 최소 1개 시트는 남겨야 함 (구글 시트 제약)
+      if (sheetsToDelete.length >= sheets.length) {
+        // 임시 시트 생성
+        const tempSheet = spreadsheet.insertSheet('임시시트');
+        logDebug('임시 시트 생성', '모든 시트 삭제 방지');
+      }
+      
+      let deletedCount = 0;
+      const errors = [];
+      
+      sheetsToDelete.forEach(sheet => {
+        try {
+          const sheetName = sheet.getName();
+          spreadsheet.deleteSheet(sheet);
+          deletedCount++;
+          logDebug('시트 삭제', sheetName);
+        } catch (error) {
+          errors.push(`${sheet.getName()}: ${error.toString()}`);
+          logDebug('시트 삭제 오류', `${sheet.getName()}: ${error.toString()}`);
+        }
+      });
+      
+      // 결과 메시지
+      if (errors.length > 0) {
+        ui.alert(
+          '부분 완료', 
+          `${deletedCount}개 시트가 삭제되었습니다.\n\n` +
+          `오류 발생 (${errors.length}개):\n${errors.slice(0, 3).join('\n')}` +
+          (errors.length > 3 ? `\n... 외 ${errors.length - 3}개` : ''),
+          ui.ButtonSet.OK
+        );
+      } else {
+        ui.alert(
+          '✅ 완료', 
+          `${deletedCount}개 시트가 성공적으로 삭제되었습니다.`,
+          ui.ButtonSet.OK
+        );
+      }
+      
+      logDebug('시트 삭제 완료', `${deletedCount}개 삭제, ${errors.length}개 오류`);
+      
+    } catch (error) {
+      ui.alert('오류', `시트 삭제 중 오류가 발생했습니다: ${error.toString()}`, ui.ButtonSet.OK);
+      logDebug('시트 삭제 오류', error.toString());
+    }
+  }
 }
