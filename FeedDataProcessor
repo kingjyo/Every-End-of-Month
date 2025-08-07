@@ -1,0 +1,944 @@
+/**
+ * 사료 데이터 자동 처리 시스템
+ * 총 정리 표의 사료 표와 사료 구매실적 표를 자동으로 채우는 기능
+ * 
+ * 주요 기능:
+ * 1. 거래처원장 시트에서 사료 데이터 추출 및 집계
+ * 2. 총 정리 표의 사료 표 자동 채우기 (B4:F16)
+ * 3. 사료 구매실적 표 업데이트 (B18:F30)
+ * 4. 빈 행 자동 숨기기 기능
+ *    - 사료 표: D열과 E열이 모두 공란인 행 숨기기
+ *    - 구매실적 표: D열이 공란인 행 숨기기
+ * 5. 계획 대비 집행율 및 전월 대비 계산
+ * 
+ * 테이블 구조:
+ * - 사료 표: B4:F16
+ *   B열: 품명
+ *   C열: 단가(원)
+ *   D열: 구입량(kg)
+ *   E열: 구입금액(원)
+ *   F열: 비고
+ * 
+ * - 사료 구매실적 표: B18:F30
+ *   B열: 월
+ *   C열: 계획금액(원)
+ *   D열: 구매실적(원)
+ *   E열: 계획대비(%)
+ *   F열: 전월대비(%)
+ * 
+ * 자동 행 숨기기 규칙:
+ * - processFeedData() 실행 시 자동으로 빈 행 숨기기
+ * - 사료 표: 구입량(D)과 구입금액(E)이 모두 없는 행
+ * - 구매실적 표: 구매실적(D)이 없는 행
+ */
+
+/**
+ * 메인 실행 함수 - 사료 데이터 전체 처리
+ */
+function processFeedData() {
+  const ui = SpreadsheetApp.getUi();
+  
+  try {
+    console.log('=== 사료 데이터 처리 시작 ===');
+    
+    // 1. 총 정리 표 찾기
+    const summarySheet = findSummarySheet();
+    if (!summarySheet) {
+      ui.alert('오류', '총 정리 표를 찾을 수 없습니다.', ui.ButtonSet.OK);
+      return;
+    }
+    
+    // 2. 기준 년월 가져오기
+    const baseYearMonth = getBaseYearMonthFromSheet(summarySheet);
+    console.log(`기준 년월: ${baseYearMonth.year}년 ${baseYearMonth.month}월`);
+    
+    // 3. 사료 표 데이터 처리 (B4:F16)
+    const feedTableResult = processFeedTable(summarySheet, baseYearMonth);
+    
+    // 4. 사료 구매실적 표 업데이트 (B18:F30)
+    const purchaseResult = updateFeedPurchaseRecord(summarySheet, baseYearMonth);
+    
+    // 5. 빈 행 자동 숨기기
+    const hideResult = autoHideEmptyRows(summarySheet);
+    
+    // 6. 결과 보고
+    const message = `사료 데이터 처리 완료!\n\n` +
+                   `📊 사료 표 (B4:F16):\n` +
+                   `  - 퓨리나: ${feedTableResult.purina.count}개 품목\n` +
+                   `  - 제축섬유질: ${feedTableResult.fiber.count}개 품목\n` +
+                   `  - 총 구입량: ${formatNumber(feedTableResult.totalWeight)}kg\n` +
+                   `  - 총 구입금액: ${formatNumber(feedTableResult.totalAmount)}원\n` +
+                   `  - 숨긴 빈 행: ${hideResult.feedTableHidden}개\n\n` +
+                   `📈 구매실적 표 (B18:F30):\n` +
+                   `  - ${baseYearMonth.month}월 실적 업데이트\n` +
+                   `  - 계획 대비: ${purchaseResult.executionRate}\n` +
+                   `  - 전월 대비: ${purchaseResult.monthOverMonth}\n` +
+                   `  - 숨긴 빈 행: ${hideResult.purchaseTableHidden}개`;
+    
+    ui.alert('✅ 완료', message, ui.ButtonSet.OK);
+    console.log('=== 사료 데이터 처리 완료 ===');
+    
+  } catch (error) {
+    console.error('사료 데이터 처리 오류:', error);
+    ui.alert('오류', `처리 중 오류가 발생했습니다:\n${error.toString()}`, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * 사료 표 데이터 처리 (B4:F16)
+ */
+function processFeedTable(summarySheet, baseYearMonth) {
+  console.log('--- 사료 표 처리 시작 ---');
+  
+  const result = {
+    purina: { count: 0, amount: 0 },
+    fiber: { count: 0, amount: 0 },
+    totalWeight: 0,
+    totalAmount: 0
+  };
+  
+  try {
+    // 1. 퓨리나 데이터 처리
+    const purinaData = processPurinaData(baseYearMonth);
+    if (purinaData.items.length > 0) {
+      updateFeedTableData(summarySheet, purinaData.items, 'purina');
+      result.purina.count = purinaData.items.length;
+      result.purina.amount = purinaData.totalAmount;
+    }
+    
+    // 2. 제축섬유질사료 데이터 처리
+    const fiberData = processFiberData(baseYearMonth);
+    if (fiberData.items.length > 0) {
+      updateFeedTableData(summarySheet, fiberData.items, 'fiber');
+      result.fiber.count = fiberData.items.length;
+      result.fiber.amount = fiberData.totalAmount;
+    }
+    
+    // 3. 합계 계산 및 업데이트
+    updateFeedTableTotals(summarySheet);
+    
+    // 4. 사료 표 전체 서식 적용
+    applyFeedTableFormats(summarySheet);
+    
+    // 5. 결과 수집
+    const d16Value = summarySheet.getRange('D16').getValue();
+    const e16Value = summarySheet.getRange('E16').getValue();
+    result.totalWeight = d16Value || 0;
+    result.totalAmount = e16Value || 0;
+    
+    console.log('사료 표 처리 완료:', result);
+    return result;
+    
+  } catch (error) {
+    console.error('사료 표 처리 오류:', error);
+    throw error;
+  }
+}
+
+/**
+ * 퓨리나 시트 데이터 처리
+ */
+function processPurinaData(baseYearMonth) {
+  console.log('퓨리나 데이터 처리 시작');
+  
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = spreadsheet.getSheets();
+  
+  // 거래처원장YY.MM + 퓨리나 시트 찾기
+  const targetSheets = sheets.filter(sheet => {
+    const name = sheet.getName();
+    const pattern1 = `거래처원장${baseYearMonth.yearShort}.${baseYearMonth.month}`;
+    const pattern2 = `거래처원장${baseYearMonth.yearShort}.${baseYearMonth.monthShort}`;
+    
+    return (name.includes(pattern1) || name.includes(pattern2)) && name.includes('퓨리나');
+  });
+  
+  if (targetSheets.length === 0) {
+    console.log('퓨리나 시트를 찾을 수 없음');
+    return { items: [], totalAmount: 0 };
+  }
+  
+  const aggregatedData = {};
+  
+  targetSheets.forEach(sheet => {
+    console.log(`처리 중: ${sheet.getName()}`);
+    
+    // 3번째 행에서 헤더 찾기
+    const headers = sheet.getRange(3, 1, 1, sheet.getLastColumn()).getValues()[0];
+    
+    // 필요한 열 인덱스 찾기
+    const colIndexes = {
+      itemName: findHeaderIndex(headers, ['품명/적요', '품명', '적요']),
+      weight: findHeaderIndex(headers, ['구입량(kg)', '구입량', '중량']),
+      unitPrice: findHeaderIndex(headers, ['단가']),
+      supplyAmount: findHeaderIndex(headers, ['공급가액', '공급가'])
+    };
+    
+    if (colIndexes.itemName === -1) {
+      console.log('품명/적요 열을 찾을 수 없음');
+      return;
+    }
+    
+    // 데이터 읽기 (4행부터)
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 4) return;
+    
+    const data = sheet.getRange(4, 1, lastRow - 3, sheet.getLastColumn()).getValues();
+    
+    // 데이터 집계
+    data.forEach(row => {
+      const itemName = normalizeItemName(row[colIndexes.itemName]);
+      if (!itemName || itemName === '합계') return;
+      
+      if (!aggregatedData[itemName]) {
+        aggregatedData[itemName] = {
+          weight: 0,
+          amount: 0,
+          unitPrice: 0
+        };
+      }
+      
+      // 구입량 합산
+      if (colIndexes.weight !== -1) {
+        const weight = parseFloat(row[colIndexes.weight]) || 0;
+        aggregatedData[itemName].weight += weight;
+      }
+      
+      // 공급가액 합산
+      if (colIndexes.supplyAmount !== -1) {
+        const amount = parseFloat(row[colIndexes.supplyAmount]) || 0;
+        aggregatedData[itemName].amount += amount;
+      }
+      
+      // 단가 (마지막 값으로 업데이트)
+      if (colIndexes.unitPrice !== -1 && row[colIndexes.unitPrice]) {
+        aggregatedData[itemName].unitPrice = parseFloat(row[colIndexes.unitPrice]) || 0;
+      }
+    });
+  });
+  
+  // 결과 정리
+  const items = Object.keys(aggregatedData).map(itemName => ({
+    name: itemName,
+    weight: aggregatedData[itemName].weight,
+    unitPrice: aggregatedData[itemName].unitPrice,
+    amount: aggregatedData[itemName].amount
+  }));
+  
+  const totalAmount = items.reduce((sum, item) => sum + item.amount, 0);
+  
+  console.log(`퓨리나 처리 완료: ${items.length}개 품목, 총 ${formatNumber(totalAmount)}원`);
+  return { items, totalAmount };
+}
+
+/**
+ * 제축섬유질사료 시트 데이터 처리
+ */
+function processFiberData(baseYearMonth) {
+  console.log('제축섬유질사료 데이터 처리 시작');
+  
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = spreadsheet.getSheets();
+  
+  // 거래처원장YY.MM + 제축섬유질사료 시트 찾기
+  const targetSheets = sheets.filter(sheet => {
+    const name = sheet.getName();
+    const pattern1 = `거래처원장${baseYearMonth.yearShort}.${baseYearMonth.month}`;
+    const pattern2 = `거래처원장${baseYearMonth.yearShort}.${baseYearMonth.monthShort}`;
+    
+    return (name.includes(pattern1) || name.includes(pattern2)) && name.includes('제축섬유질사료');
+  });
+  
+  if (targetSheets.length === 0) {
+    console.log('제축섬유질사료 시트를 찾을 수 없음');
+    return { items: [], totalAmount: 0 };
+  }
+  
+  const aggregatedData = {};
+  
+  targetSheets.forEach(sheet => {
+    console.log(`처리 중: ${sheet.getName()}`);
+    
+    // 3번째 행에서 헤더 찾기
+    const headers = sheet.getRange(3, 1, 1, sheet.getLastColumn()).getValues()[0];
+    
+    // 필요한 열 인덱스 찾기
+    const colIndexes = {
+      itemName: findHeaderIndex(headers, ['품명/적요', '품명', '적요']),
+      weight: findHeaderIndex(headers, ['구입량(kg)', '구입량', '중량']),
+      unitPrice: findHeaderIndex(headers, ['단가']),
+      supplyAmount: findHeaderIndex(headers, ['공급가액', '공급가'])
+    };
+    
+    if (colIndexes.itemName === -1) {
+      console.log('품명/적요 열을 찾을 수 없음');
+      return;
+    }
+    
+    // 데이터 읽기 (4행부터)
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 4) return;
+    
+    const data = sheet.getRange(4, 1, lastRow - 3, sheet.getLastColumn()).getValues();
+    
+    // 데이터 집계 (주로 연맥)
+    data.forEach(row => {
+      const itemName = normalizeItemName(row[colIndexes.itemName]);
+      if (!itemName || itemName === '합계') return;
+      
+      if (!aggregatedData[itemName]) {
+        aggregatedData[itemName] = {
+          weight: 0,
+          amount: 0,
+          unitPrice: 0
+        };
+      }
+      
+      // 구입량 합산
+      if (colIndexes.weight !== -1) {
+        const weight = parseFloat(row[colIndexes.weight]) || 0;
+        aggregatedData[itemName].weight += weight;
+      }
+      
+      // 공급가액 합산
+      if (colIndexes.supplyAmount !== -1) {
+        const amount = parseFloat(row[colIndexes.supplyAmount]) || 0;
+        aggregatedData[itemName].amount += amount;
+      }
+      
+      // 단가
+      if (colIndexes.unitPrice !== -1 && row[colIndexes.unitPrice]) {
+        aggregatedData[itemName].unitPrice = parseFloat(row[colIndexes.unitPrice]) || 0;
+      }
+    });
+  });
+  
+  // 결과 정리
+  const items = Object.keys(aggregatedData).map(itemName => ({
+    name: itemName,
+    weight: aggregatedData[itemName].weight,
+    unitPrice: aggregatedData[itemName].unitPrice,
+    amount: aggregatedData[itemName].amount
+  }));
+  
+  const totalAmount = items.reduce((sum, item) => sum + item.amount, 0);
+  
+  console.log(`제축섬유질 처리 완료: ${items.length}개 품목, 총 ${formatNumber(totalAmount)}원`);
+  return { items, totalAmount };
+}
+
+/**
+ * 사료 표에 데이터 업데이트
+ */
+function updateFeedTableData(summarySheet, items, sourceType) {
+  console.log(`사료 표 업데이트: ${sourceType}`);
+  
+  // B5:B15 범위의 품명 가져오기
+  const itemNames = summarySheet.getRange('B5:B15').getValues();
+  
+  items.forEach(item => {
+    // 품명 매칭 (B열에서 찾기)
+    for (let i = 0; i < itemNames.length; i++) {
+      const sheetItemName = normalizeItemName(itemNames[i][0]);
+      
+      if (sheetItemName === item.name) {
+        const rowNum = 5 + i; // 실제 행 번호
+        
+        // C열: 단가
+        if (item.unitPrice > 0) {
+          summarySheet.getRange(`C${rowNum}`).setValue(item.unitPrice);
+        }
+        
+        // D열: 구입량(kg)
+        if (item.weight > 0) {
+          summarySheet.getRange(`D${rowNum}`).setValue(item.weight);
+        }
+        
+        // E열: 구입금액(원)
+        if (item.amount > 0) {
+          summarySheet.getRange(`E${rowNum}`).setValue(item.amount);
+        }
+        
+        console.log(`  ${item.name}: 단가=${formatNumber(item.unitPrice)}, 중량=${formatNumber(item.weight)}kg, 금액=${formatNumber(item.amount)}원`);
+        break;
+      }
+    }
+  });
+}
+
+/**
+ * 사료 표 합계 업데이트
+ */
+function updateFeedTableTotals(summarySheet) {
+  console.log('사료 표 합계 계산');
+  
+  // D5:D15 합계 → D16
+  const weightRange = summarySheet.getRange('D5:D15');
+  const weights = weightRange.getValues();
+  const totalWeight = weights.reduce((sum, row) => sum + (parseFloat(row[0]) || 0), 0);
+  summarySheet.getRange('D16').setValue(totalWeight);
+  
+  // E5:E15 합계 → E16
+  const amountRange = summarySheet.getRange('E5:E15');
+  const amounts = amountRange.getValues();
+  const totalAmount = amounts.reduce((sum, row) => sum + (parseFloat(row[0]) || 0), 0);
+  summarySheet.getRange('E16').setValue(totalAmount);
+  
+  console.log(`  총 구입량: ${formatNumber(totalWeight)}kg`);
+  console.log(`  총 구입금액: ${formatNumber(totalAmount)}원`);
+}
+
+/**
+ * 사료 구매실적 표 업데이트 (B18:F30)
+ */
+function updateFeedPurchaseRecord(summarySheet, baseYearMonth) {
+  console.log('--- 사료 구매실적 표 업데이트 ---');
+  
+  const result = {
+    executionRate: '0%',
+    monthOverMonth: '0%'
+  };
+  
+  try {
+    // 1. 사료 정리 표 찾기
+    const feedSheet = findFeedSheet();
+    if (!feedSheet) {
+      console.log('사료 정리 표를 찾을 수 없음');
+      return result;
+    }
+    
+    // 2. 현재 월 행 찾기 (B19:B30) - 새 위치
+    const monthColumn = summarySheet.getRange('B19:B30').getValues();
+    let targetRow = -1;
+    const targetMonth = parseInt(baseYearMonth.month) + '월';
+    
+    for (let i = 0; i < monthColumn.length; i++) {
+      if (monthColumn[i][0] === targetMonth) {
+        targetRow = 19 + i;  // 19행부터 시작
+        break;
+      }
+    }
+    
+    if (targetRow === -1) {
+      console.log(`${targetMonth} 행을 찾을 수 없음`);
+      return result;
+    }
+    
+    // 3. 계획 금액 가져오기 (사료 정리 표 C4:O5)
+    const planHeaders = feedSheet.getRange('C4:O4').getValues()[0];
+    let planAmount = 0;
+    
+    for (let i = 0; i < planHeaders.length; i++) {
+      if (planHeaders[i] === targetMonth) {
+        const planValue = feedSheet.getRange(5, 3 + i).getValue();
+        planAmount = (parseFloat(planValue) || 0) * 1000; // 천원 단위를 원 단위로
+        break;
+      }
+    }
+    
+    // 4. 실적 금액 가져오기 (E16)
+    const actualAmount = summarySheet.getRange('E16').getValue() || 0;
+    
+    // 5. 값 업데이트
+    // C열: 계획금액 (기존 I열)
+    if (planAmount > 0) {
+      summarySheet.getRange(`C${targetRow}`).setValue(planAmount);
+    }
+    
+    // D열: 구매실적 (기존 J열)
+    summarySheet.getRange(`D${targetRow}`).setValue(actualAmount);
+    
+    // E열: 계획 대비 집행율 (D/C) (기존 K열)
+    if (planAmount > 0) {
+      const executionRate = actualAmount / planAmount;
+      summarySheet.getRange(`E${targetRow}`).setValue(executionRate);
+      result.executionRate = Math.round(executionRate * 100) + '%';
+    }
+    
+    // F열: 전월 대비 (기존 L열)
+    const prevMonth = baseYearMonth.prevMonth + '월';
+    let prevMonthRow = -1;
+    
+    for (let i = 0; i < monthColumn.length; i++) {
+      if (monthColumn[i][0] === prevMonth) {
+        prevMonthRow = 19 + i;  // 새 위치 기준
+        break;
+      }
+    }
+    
+    if (prevMonthRow !== -1) {
+      const prevActual = summarySheet.getRange(`D${prevMonthRow}`).getValue() || 0;
+      if (prevActual > 0) {
+        const monthOverMonth = actualAmount / prevActual;
+        summarySheet.getRange(`F${targetRow}`).setValue(monthOverMonth);
+        result.monthOverMonth = Math.round(monthOverMonth * 100) + '%';
+      }
+    }
+    
+    // 6. 서식 적용 (새 위치)
+    applyPurchaseTableFormats(summarySheet, targetRow);
+    
+    console.log(`구매실적 표 업데이트 완료: ${targetMonth}`);
+    console.log(`  계획: ${formatNumber(planAmount)}원`);
+    console.log(`  실적: ${formatNumber(actualAmount)}원`);
+    console.log(`  집행율: ${result.executionRate}`);
+    console.log(`  전월대비: ${result.monthOverMonth}`);
+    
+    return result;
+    
+  } catch (error) {
+    console.error('구매실적 표 업데이트 오류:', error);
+    return result;
+  }
+}
+
+/**
+ * 구매실적 표 숫자 서식 적용 (새 위치: B18:F30)
+ */
+function applyPurchaseTableFormats(sheet, row) {
+  // C, D열: 천 단위 콤마 (계획금액, 구매실적)
+  sheet.getRange(`C${row}:D${row}`).setNumberFormat('#,##0');
+  
+  // E, F열: 백분율 (계획대비, 전월대비) - 소수점 없음
+  sheet.getRange(`E${row}:F${row}`).setNumberFormat('0%');
+}
+
+/**
+ * 사료 표 전체 서식 적용
+ */
+function applyFeedTableFormats(summarySheet) {
+  console.log('사료 표 서식 적용');
+  
+  // C5:C15 (단가): 천 단위 콤마
+  summarySheet.getRange('C5:C15').setNumberFormat('#,##0');
+  
+  // D5:D15 (구입량): 천 단위 콤마
+  summarySheet.getRange('D5:D15').setNumberFormat('#,##0');
+  
+  // E5:E15 (구입금액): 천 단위 콤마
+  summarySheet.getRange('E5:E15').setNumberFormat('#,##0');
+  
+  // D16, E16 (합계): 천 단위 콤마 + 굵게 표시
+  summarySheet.getRange('D16').setNumberFormat('#,##0').setFontWeight('bold');
+  summarySheet.getRange('E16').setNumberFormat('#,##0').setFontWeight('bold');
+  
+  console.log('  서식 적용 완료: C5:E15 및 D16, E16 합계');
+}
+
+// ===============================================
+// 헬퍼 함수들
+// ===============================================
+
+/**
+ * 총 정리 표 시트 찾기
+ */
+function findSummarySheet() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const possibleNames = ['총 정리 표', '총정리표', '총 정리표', '총정리 표'];
+  
+  for (const name of possibleNames) {
+    const sheet = spreadsheet.getSheetByName(name);
+    if (sheet) return sheet;
+  }
+  
+  return null;
+}
+
+/**
+ * 사료 정리 표 시트 찾기
+ */
+function findFeedSheet() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const possibleNames = ['사료 정리 표', '사료정리표', '사료 정리표', '사료정리 표'];
+  
+  for (const name of possibleNames) {
+    const sheet = spreadsheet.getSheetByName(name);
+    if (sheet) return sheet;
+  }
+  
+  return null;
+}
+
+/**
+ * 기준 년월 가져오기
+ */
+function getBaseYearMonthFromSheet(sheet) {
+  const year = sheet.getRange('D1').getValue().toString();
+  const month = sheet.getRange('F1').getValue().toString();
+  const prevMonth = sheet.getRange('F2').getValue() || (parseInt(month) - 1);
+  
+  return {
+    year: year,
+    month: month.padStart(2, '0'),
+    yearShort: year.substring(2),
+    monthShort: parseInt(month).toString(),
+    prevMonth: prevMonth
+  };
+}
+
+/**
+ * 헤더 인덱스 찾기
+ */
+function findHeaderIndex(headers, possibleNames) {
+  for (let i = 0; i < headers.length; i++) {
+    const header = headers[i].toString().trim();
+    for (const name of possibleNames) {
+      if (header.includes(name)) {
+        return i;
+      }
+    }
+  }
+  return -1;
+}
+
+/**
+ * 품명 정규화
+ */
+function normalizeItemName(name) {
+  if (!name) return '';
+  
+  const nameStr = name.toString().trim();
+  
+  // 품명 매핑 테이블
+  const nameMap = {
+    '송아지본110+': ['송아지본110+', '송아지본110', '송아지본 110+'],
+    '송아지본230+': ['송아지본230+', '송아지본230', '송아지본 230+'],
+    '포커스마무리 지대': ['포커스마무리 지대', '포커스마무리지대', '포커스 마무리 지대'],
+    '포커스육성(암/수) 지대': ['포커스육성(암/수) 지대', '포커스육성 지대', '포커스육성지대'],
+    '포커스임신우 지대': ['포커스임신우 지대', '포커스임신우지대', '포커스 임신우 지대'],
+    '포커스큰소 지대': ['포커스큰소 지대', '포커스큰소지대', '포커스 큰소 지대'],
+    '포커스마무리 벌크': ['포커스마무리 벌크', '포커스마무리벌크', '포커스 마무리 벌크'],
+    '포커스번식우 벌크': ['포커스번식우 벌크', '포커스번식우벌크', '포커스 번식우 벌크'],
+    '포커스육성 벌크': ['포커스육성 벌크', '포커스육성벌크', '포커스 육성 벌크'],
+    '포커스큰소 벌크': ['포커스큰소 벌크', '포커스큰소벌크', '포커스 큰소 벌크'],
+    '연맥': ['연맥', '연 맥']
+  };
+  
+  // 매핑 테이블에서 찾기
+  for (const [standardName, variations] of Object.entries(nameMap)) {
+    for (const variation of variations) {
+      if (nameStr.includes(variation)) {
+        return standardName;
+      }
+    }
+  }
+  
+  return nameStr;
+}
+
+/**
+ * 숫자 포맷팅 (천 단위 콤마)
+ */
+function formatNumber(num) {
+  if (typeof num !== 'number') {
+    num = parseFloat(num) || 0;
+  }
+  return num.toLocaleString('ko-KR');
+}
+
+// ===============================================
+// 메뉴 추가 함수 (선택적)
+// ===============================================
+
+/**
+ * 메뉴에 사료 데이터 처리 기능 추가
+ * 메인 Code.gs의 onOpen 함수에서 호출하거나 별도로 실행
+ */
+function addFeedMenuItems() {
+  const ui = SpreadsheetApp.getUi();
+  
+  try {
+    // 기존 메뉴가 있는지 확인하고 추가
+    ui.createMenu('🌾 사료 데이터 처리')
+      .addItem('📊 사료 표 자동 채우기', 'processFeedData')
+      .addItem('📈 사료 구매실적만 업데이트', 'updatePurchaseRecordOnly')
+      .addSeparator()
+      .addItem('👁️ 빈 행 숨기기/보이기 (토글)', 'toggleEmptyFeedRows')
+      .addItem('👁️ 모든 행 보이기', 'showAllHiddenRows')
+      .addSeparator()
+      .addItem('🔍 퓨리나 데이터 확인', 'checkPurinaData')
+      .addItem('🔍 제축섬유질 데이터 확인', 'checkFiberData')
+      .addSeparator()
+      .addItem('🗑️ 사료 표 초기화', 'clearFeedTableData')
+      .addToUi();
+      
+  } catch (error) {
+    console.error('메뉴 추가 오류:', error);
+  }
+}
+
+/**
+ * 구매실적만 업데이트
+ */
+function updatePurchaseRecordOnly() {
+  const ui = SpreadsheetApp.getUi();
+  
+  try {
+    const summarySheet = findSummarySheet();
+    if (!summarySheet) {
+      ui.alert('오류', '총 정리 표를 찾을 수 없습니다.', ui.ButtonSet.OK);
+      return;
+    }
+    
+    const baseYearMonth = getBaseYearMonthFromSheet(summarySheet);
+    const result = updateFeedPurchaseRecord(summarySheet, baseYearMonth);
+    
+    // 빈 행 자동 숨기기 (구매실적 표만)
+    let hiddenCount = 0;
+    for (let i = 19; i <= 30; i++) {
+      const dValue = summarySheet.getRange(`D${i}`).getValue();
+      if (!dValue) {
+        summarySheet.hideRows(i);
+        hiddenCount++;
+      }
+    }
+    
+    ui.alert('완료', 
+            `${baseYearMonth.month}월 구매실적 업데이트 완료 (B18:F30)\n\n` +
+            `계획 대비: ${result.executionRate}\n` +
+            `전월 대비: ${result.monthOverMonth}\n` +
+            `숨긴 빈 행: ${hiddenCount}개`,
+            ui.ButtonSet.OK);
+            
+  } catch (error) {
+    ui.alert('오류', `처리 중 오류: ${error.toString()}`, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * 퓨리나 데이터 확인 (디버깅용)
+ */
+function checkPurinaData() {
+  const ui = SpreadsheetApp.getUi();
+  
+  try {
+    const summarySheet = findSummarySheet();
+    const baseYearMonth = getBaseYearMonthFromSheet(summarySheet);
+    const data = processPurinaData(baseYearMonth);
+    
+    let message = `퓨리나 데이터 (${baseYearMonth.year}년 ${baseYearMonth.month}월)\n\n`;
+    
+    if (data.items.length === 0) {
+      message += '데이터를 찾을 수 없습니다.';
+    } else {
+      data.items.forEach(item => {
+        message += `${item.name}:\n`;
+        message += `  단가: ${formatNumber(item.unitPrice)}원\n`;
+        message += `  구입량: ${formatNumber(item.weight)}kg\n`;
+        message += `  금액: ${formatNumber(item.amount)}원\n\n`;
+      });
+      message += `총 금액: ${formatNumber(data.totalAmount)}원`;
+    }
+    
+    ui.alert('퓨리나 데이터', message, ui.ButtonSet.OK);
+    
+  } catch (error) {
+    ui.alert('오류', error.toString(), ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * 제축섬유질 데이터 확인 (디버깅용)
+ */
+function checkFiberData() {
+  const ui = SpreadsheetApp.getUi();
+  
+  try {
+    const summarySheet = findSummarySheet();
+    const baseYearMonth = getBaseYearMonthFromSheet(summarySheet);
+    const data = processFiberData(baseYearMonth);
+    
+    let message = `제축섬유질사료 데이터 (${baseYearMonth.year}년 ${baseYearMonth.month}월)\n\n`;
+    
+    if (data.items.length === 0) {
+      message += '데이터를 찾을 수 없습니다.';
+    } else {
+      data.items.forEach(item => {
+        message += `${item.name}:\n`;
+        message += `  단가: ${formatNumber(item.unitPrice)}원\n`;
+        message += `  구입량: ${formatNumber(item.weight)}kg\n`;
+        message += `  금액: ${formatNumber(item.amount)}원\n\n`;
+      });
+      message += `총 금액: ${formatNumber(data.totalAmount)}원`;
+    }
+    
+    ui.alert('제축섬유질 데이터', message, ui.ButtonSet.OK);
+    
+  } catch (error) {
+    ui.alert('오류', error.toString(), ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * 사료 표 데이터 일괄 삭제 (초기화용)
+ */
+function clearFeedTableData() {
+  const ui = SpreadsheetApp.getUi();
+  
+  const response = ui.alert(
+    '사료 표 초기화',
+    '사료 표의 모든 데이터를 삭제하시겠습니까?\n\n' +
+    '삭제 범위:\n' +
+    '• 사료 표: C5:E16\n' +
+    '• 구매실적 표: C19:F30 (선택적)',
+    ui.ButtonSet.YES_NO
+  );
+  
+  if (response === ui.Button.YES) {
+    try {
+      const summarySheet = findSummarySheet();
+      if (!summarySheet) {
+        ui.alert('오류', '총 정리 표를 찾을 수 없습니다.', ui.ButtonSet.OK);
+        return;
+      }
+      
+      // 숨겨진 행 모두 표시 (초기화 전에)
+      summarySheet.showRows(5, 11);  // 사료 표
+      summarySheet.showRows(19, 12); // 구매실적 표
+      
+      // 사료 표 데이터 초기화 (C5:E16)
+      summarySheet.getRange('C5:E16').clearContent();
+      
+      // 구매실적 표도 초기화할지 묻기
+      const clearPurchaseResponse = ui.alert(
+        '추가 초기화',
+        '사료 구매실적 표(C19:F30)도 초기화하시겠습니까?',
+        ui.ButtonSet.YES_NO
+      );
+      
+      if (clearPurchaseResponse === ui.Button.YES) {
+        summarySheet.getRange('C19:F30').clearContent();
+        ui.alert('완료', '사료 표와 구매실적 표가 모두 초기화되었습니다.\n숨겨진 행도 모두 표시되었습니다.', ui.ButtonSet.OK);
+      } else {
+        ui.alert('완료', '사료 표 데이터만 초기화되었습니다.\n숨겨진 행도 모두 표시되었습니다.', ui.ButtonSet.OK);
+      }
+      
+      console.log('사료 표 초기화 완료');
+      
+    } catch (error) {
+      ui.alert('오류', `초기화 중 오류: ${error.toString()}`, ui.ButtonSet.OK);
+    }
+  }
+}
+
+/**
+ * 자동으로 빈 행 숨기기 (데이터 처리 후 자동 실행)
+ */
+function autoHideEmptyRows(summarySheet) {
+  console.log('빈 행 자동 숨기기 시작');
+  
+  const result = {
+    feedTableHidden: 0,
+    purchaseTableHidden: 0
+  };
+  
+  try {
+    // 1. 사료 표 빈 행 숨기기 (B4:F16)
+    // D열(구입량)과 E열(구입금액)이 모두 비어있는 행 숨기기
+    for (let i = 5; i <= 15; i++) {
+      const dValue = summarySheet.getRange(`D${i}`).getValue(); // 구입량
+      const eValue = summarySheet.getRange(`E${i}`).getValue(); // 구입금액
+      
+      if (!dValue && !eValue) {
+        summarySheet.hideRows(i);
+        result.feedTableHidden++;
+        console.log(`  사료 표 ${i}행 숨김`);
+      }
+    }
+    
+    // 2. 사료 구매실적 표 빈 행 숨기기 (B18:F30)
+    // D열(구매실적)이 비어있는 행 숨기기
+    for (let i = 19; i <= 30; i++) {
+      const dValue = summarySheet.getRange(`D${i}`).getValue(); // 구매실적
+      
+      if (!dValue) {
+        summarySheet.hideRows(i);
+        result.purchaseTableHidden++;
+        console.log(`  구매실적 표 ${i}행 숨김`);
+      }
+    }
+    
+    console.log(`빈 행 숨기기 완료: 사료 표 ${result.feedTableHidden}개, 구매실적 표 ${result.purchaseTableHidden}개`);
+    return result;
+    
+  } catch (error) {
+    console.error('빈 행 숨기기 오류:', error);
+    return result;
+  }
+}
+
+/**
+ * 사료 표와 구매실적 표 빈 행 숨기기/보이기 토글
+ */
+function toggleEmptyFeedRows() {
+  const summarySheet = findSummarySheet();
+  const ui = SpreadsheetApp.getUi();
+  
+  if (!summarySheet) {
+    ui.alert('오류', '총 정리 표를 찾을 수 없습니다.', ui.ButtonSet.OK);
+    return;
+  }
+  
+  // 현재 숨겨진 행이 있는지 확인
+  let hasHiddenRows = false;
+  
+  // 사료 표 범위 확인 (5-15행)
+  for (let i = 5; i <= 15; i++) {
+    if (summarySheet.isRowHiddenByUser(i)) {
+      hasHiddenRows = true;
+      break;
+    }
+  }
+  
+  // 구매실적 표 범위 확인 (19-30행)
+  if (!hasHiddenRows) {
+    for (let i = 19; i <= 30; i++) {
+      if (summarySheet.isRowHiddenByUser(i)) {
+        hasHiddenRows = true;
+        break;
+      }
+    }
+  }
+  
+  if (hasHiddenRows) {
+    // 숨겨진 행이 있으면 모두 보이기
+    summarySheet.showRows(5, 11);  // 사료 표 (5행부터 11개 행)
+    summarySheet.showRows(19, 12); // 구매실적 표 (19행부터 12개 행)
+    ui.alert('완료', '모든 행을 표시했습니다.', ui.ButtonSet.OK);
+    console.log('모든 행 표시 완료');
+    
+  } else {
+    // 빈 행 숨기기
+    const result = autoHideEmptyRows(summarySheet);
+    
+    if (result.feedTableHidden > 0 || result.purchaseTableHidden > 0) {
+      ui.alert('완료', 
+              `빈 행 숨기기 완료:\n\n` +
+              `• 사료 표: ${result.feedTableHidden}개 행\n` +
+              `• 구매실적 표: ${result.purchaseTableHidden}개 행`,
+              ui.ButtonSet.OK);
+    } else {
+      ui.alert('정보', '숨길 빈 행이 없습니다.', ui.ButtonSet.OK);
+    }
+  }
+}
+
+/**
+ * 모든 숨겨진 행 보이기
+ */
+function showAllHiddenRows() {
+  const summarySheet = findSummarySheet();
+  const ui = SpreadsheetApp.getUi();
+  
+  if (!summarySheet) {
+    ui.alert('오류', '총 정리 표를 찾을 수 없습니다.', ui.ButtonSet.OK);
+    return;
+  }
+  
+  // 사료 표와 구매실적 표의 모든 행 보이기
+  summarySheet.showRows(5, 11);  // 사료 표 (5-15행)
+  summarySheet.showRows(19, 12); // 구매실적 표 (19-30행)
+  
+  ui.alert('완료', '모든 숨겨진 행을 표시했습니다.', ui.ButtonSet.OK);
+  console.log('모든 행 표시 완료');
+}
